@@ -286,7 +286,7 @@ function reprendreEtape() {
   else passerEnPlacement();
 }
 
-// Deplace le modele deja pose : on repasse en mode reticule/hit-test sans
+// Deplace le modele deja pose : il se remet a suivre la main droite, sans
 // rien perdre (points et couleurs sont stockes independamment de la
 // position de l'ancre). Le prochain appui gachette fige la nouvelle place.
 var deplacementEnCours = false;
@@ -295,7 +295,6 @@ function deplacerSysteme() {
   anchorPlaced = false;
   panneau.visible = false;
   panneauPalette.visible = false;
-  reticulePlacement.visible = false;
 }
 
 function chargerModele() {
@@ -874,6 +873,29 @@ var rayon = new THREE.Raycaster();
 var mat4 = new THREE.Matrix4();
 var grabs = [null, null];   // panneau ou panneauPalette actuellement tenu par chaque manette, ou null
 
+// --- Latteralite des manettes (pour faire suivre la main DROITE) --------
+var mainDroite = null, mainGauche = null;   // idx (0 ou 1) une fois connues
+controllers.forEach(function (ctrl, idx) {
+  ctrl.addEventListener('connected', function (event) {
+    var main = event.data && event.data.handedness;
+    if (main === 'right') mainDroite = idx;
+    else if (main === 'left') mainGauche = idx;
+  });
+  ctrl.addEventListener('disconnected', function () {
+    if (mainDroite === idx) mainDroite = null;
+    if (mainGauche === idx) mainGauche = null;
+  });
+});
+// Repli si la latteralite n'est pas encore connue (ex: premiere frame) :
+// par convention WebXR l'index 1 est generalement la main droite.
+function indexMainDroite() { return mainDroite !== null ? mainDroite : 1; }
+
+// --- Rotation (1 grip) et zoom (2 grips) du systeme pose ----------------
+var grabSysteme    = [false, false];
+var qPrecSysteme    = [new THREE.Quaternion(), new THREE.Quaternion()];
+var zoomBase        = null;   // { distance, echelle } au moment ou la 2e main attrape
+var ECHELLE_MIN = 0.4, ECHELLE_MAX = 2.5;
+
 // Reticule : petit anneau qui suit le point vise sur le modele.
 var reticuleVisee = new THREE.Mesh(
   new THREE.RingGeometry(0.006, 0.009, 20),
@@ -899,12 +921,11 @@ controllers.forEach(function (ctrl, idx) {
   ctrl.add(ligne);
 
   ctrl.addEventListener('selectstart', function () {
-    // 1er appui (ou reappui apres "DEPLACER LE MODELE") : fige la position
-    // de l'apercu (deja visible et suivant le reticule). Si le modele n'est
-    // pas encore charge (reseau lent), on attend juste qu'il le soit.
+    // 1er appui (ou reappui apres "DEPLACER") : fige la position de
+    // l'apercu (deja visible et suivant la main droite). Si le modele
+    // n'est pas encore charge (reseau lent), on attend juste qu'il le soit.
     if (!anchorPlaced) {
       anchorPlaced = true;
-      reticulePlacement.visible = false;
       if (modeleCharge) {
         if (deplacementEnCours) { deplacementEnCours = false; reprendreEtape(); }
         else demarrerEtape();
@@ -945,7 +966,8 @@ controllers.forEach(function (ctrl, idx) {
   });
 
   // Grip (prehension) : attraper un panneau flottant pour le repositionner
-  // librement, comme on attrape une piece dans l'app d'assemblage.
+  // (comme dans l'app d'assemblage), sinon attraper le systeme pour le
+  // faire tourner (1 main) ou le zoomer (2 mains).
   ctrl.addEventListener('squeezestart', function () {
     mat4.identity().extractRotation(ctrl.matrixWorld);
     rayon.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
@@ -955,24 +977,49 @@ controllers.forEach(function (ctrl, idx) {
     if (panneau.visible) cibles.push(panneau);
     if (panneauPalette.visible) cibles.push(panneauPalette);
     var hits = rayon.intersectObjects(cibles, false);
-    if (!hits.length) return;
+    if (hits.length) {
+      grabs[idx] = hits[0].object;
+      ctrl.attach(hits[0].object);
+      return;
+    }
 
-    grabs[idx] = hits[0].object;
-    ctrl.attach(hits[0].object);
+    // Pas de panneau vise : on attrape le systeme lui-meme.
+    grabSysteme[idx] = true;
+    ctrl.getWorldQuaternion(qPrecSysteme[idx]);
+
+    var autre = 1 - idx;
+    if (grabSysteme[autre]) {
+      // La 2e main vient de saisir en plus de la 1ere : on bascule en zoom.
+      var p0 = new THREE.Vector3(), p1 = new THREE.Vector3();
+      controllers[0].getWorldPosition(p0);
+      controllers[1].getWorldPosition(p1);
+      zoomBase = { distance: p0.distanceTo(p1), echelle: anchor.scale.x };
+    }
   });
 
   ctrl.addEventListener('squeezeend', function () {
     var cible = grabs[idx];
-    if (!cible) return;
-    scene.attach(cible);   // reparente a la scene SANS sauter (garde la position mondiale)
+    if (cible) {
+      scene.attach(cible);   // reparente a la scene SANS sauter (garde la position mondiale)
+      var wp = new THREE.Vector3();
+      cible.getWorldPosition(wp);
+      var offsetLocal = wp.clone().sub(anchor.position);
+      if (cible === panneau) offsetPanneau.copy(offsetLocal);
+      else if (cible === panneauPalette) offsetPalette.copy(offsetLocal);
+      grabs[idx] = null;
+      return;
+    }
 
-    var wp = new THREE.Vector3();
-    cible.getWorldPosition(wp);
-    var offsetLocal = wp.clone().sub(anchor.position);
-    if (cible === panneau) offsetPanneau.copy(offsetLocal);
-    else if (cible === panneauPalette) offsetPalette.copy(offsetLocal);
-
-    grabs[idx] = null;
+    if (grabSysteme[idx]) {
+      grabSysteme[idx] = false;
+      zoomBase = null;
+      var autre = 1 - idx;
+      if (grabSysteme[autre]) {
+        // Une main relache pendant un zoom : l'autre reprend la rotation
+        // seule, sans saut (on relit son orientation actuelle).
+        controllers[autre].getWorldQuaternion(qPrecSysteme[autre]);
+      }
+    }
   });
 });
 
@@ -1023,16 +1070,20 @@ function majVisee(ctrl) {
 }
 
 // =====================================================================
-//  PLACEMENT SUR LA TABLE (hit-test)
+//  PLACEMENT : le systeme suit la main droite jusqu'a la gachette
+//  (remplace le hit-test, peu fiable sur certains casques/navigateurs).
 // =====================================================================
-var reticulePlacement = new THREE.Mesh(
-  new THREE.RingGeometry(0.055, 0.075, 32).rotateX(-Math.PI / 2),
-  new THREE.MeshBasicMaterial({ color: 0x35c9ff })
-);
-reticulePlacement.visible = false;
-scene.add(reticulePlacement);
+var OFFSET_MAIN = new THREE.Vector3(0, -0.05, -0.22);   // devant, legerement sous la main
+var _pMain = new THREE.Vector3(), _qMain = new THREE.Quaternion();
 
-var hitTestSource = null, hitTestDemande = false;
+function suivreMainDroite() {
+  var idxD = indexMainDroite();
+  var ctrlD = controllers[idxD];
+  if (!ctrlD) return;
+  ctrlD.getWorldPosition(_pMain);
+  ctrlD.getWorldQuaternion(_qMain);
+  anchor.position.copy(_pMain).add(OFFSET_MAIN.clone().applyQuaternion(_qMain));
+}
 
 // =====================================================================
 //  BOUCLE DE RENDU
@@ -1040,26 +1091,26 @@ var hitTestSource = null, hitTestDemande = false;
 var camPos = new THREE.Vector3();
 
 renderer.setAnimationLoop(function (t, frame) {
-  if (frame && !anchorPlaced) {
-    var session = renderer.xr.getSession();
-    var refSpace = renderer.xr.getReferenceSpace();
+  if (frame && !anchorPlaced && modeleCharge) {
+    suivreMainDroite();
+  }
 
-    if (!hitTestDemande) {
-      hitTestDemande = true;
-      session.requestReferenceSpace('viewer').then(function (vs) {
-        session.requestHitTestSource({ space: vs }).then(function (src) { hitTestSource = src; });
-      }).catch(function () {});
-    }
-
-    if (hitTestSource) {
-      var res = frame.getHitTestResults(hitTestSource);
-      if (res.length) {
-        var pose = res[0].getPose(refSpace);
-        reticulePlacement.visible = true;
-        reticulePlacement.matrix.fromArray(pose.transform.matrix);
-        reticulePlacement.matrix.decompose(reticulePlacement.position, reticulePlacement.quaternion, reticulePlacement.scale);
-        anchor.position.copy(reticulePlacement.position);
-      }
+  // Rotation (1 grip) / zoom (2 grips) du systeme, une fois pose ou meme
+  // pendant qu'il suit encore la main.
+  if (grabSysteme[0] && grabSysteme[1] && zoomBase) {
+    var p0 = new THREE.Vector3(), p1 = new THREE.Vector3();
+    controllers[0].getWorldPosition(p0);
+    controllers[1].getWorldPosition(p1);
+    var ratio = p0.distanceTo(p1) / Math.max(zoomBase.distance, 1e-4);
+    anchor.scale.setScalar(THREE.MathUtils.clamp(zoomBase.echelle * ratio, ECHELLE_MIN, ECHELLE_MAX));
+  } else {
+    for (var kk = 0; kk < 2; kk++) {
+      if (!grabSysteme[kk]) continue;
+      var qActuelle = new THREE.Quaternion();
+      controllers[kk].getWorldQuaternion(qActuelle);
+      var delta = qActuelle.clone().multiply(qPrecSysteme[kk].clone().invert());
+      anchor.quaternion.premultiply(delta);
+      qPrecSysteme[kk].copy(qActuelle);
     }
   }
 
@@ -1092,10 +1143,11 @@ renderer.setAnimationLoop(function (t, frame) {
 // optionnels de la liste leur deplait ("session configuration not
 // supported"), meme s'il est demande en optionalFeatures. On retente donc
 // avec une liste de plus en plus courte plutot que d'echouer d'un coup.
+// hit-test retire de la liste : le placement suit desormais la main droite,
+// il n'est plus utilise (et c'etait une source possible de refus de session).
 var LISTES_FEATURES = [
-  ['hit-test', 'local-floor', 'local'],
-  ['hit-test', 'local-floor'],
-  ['hit-test'],
+  ['local-floor', 'local'],
+  ['local-floor'],
   []
 ];
 
@@ -1108,8 +1160,6 @@ function demarrerSessionAR(i) {
     renderer.xr.setSession(session).then(function () {
       overlay.style.display = 'none';
       anchorPlaced = false;
-      hitTestDemande = false;
-      hitTestSource = null;
       if (!modeleCharge) chargerModele();   // charge tout de suite : le modele est visible en apercu avant la pose
 
       session.addEventListener('end', function () {
