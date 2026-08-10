@@ -607,7 +607,7 @@ function majPanneauColoriage(message) {
   ];
   if (message) corps.push({ texte: message, couleur: '#ff9f4a' });
 
-  dessinerPanneau('Étape 1 — Coloriage des solides', corps, [
+  dessinerPanneau('Recherche des classes d’équivalence', corps, [
     bouton(0, 0, 'VALIDER',      '#2f7d4f', validerColoriage),
     bouton(0, 1, 'TOUT EFFACER', '#7d4f2f', effacerColoriageTout),
     bouton(0, 2, 'ANNULER',      '#3a5f8a', annulerDerniere)
@@ -808,6 +808,158 @@ function afficherResultatFinal() {
       m.material.depthWrite = false;   // evite qu'il masque le filaire derriere lui
     });
   });
+  passerEnForces();
+}
+
+// =====================================================================
+//  ETAPE 3 : MODELISATION DES FORCES
+//
+//  L'etudiant trace au grossier, a la gachette, le vecteur representant le
+//  poids de la charge : depuis le point H (charge/chape), vers le bas.
+//  Corrige sur la DIRECTION uniquement (vertical local du modele, pas la
+//  verticale reelle : le systeme peut avoir ete tourne au grip). La longueur
+//  du trace de l'etudiant n'a pas d'importance ("trait grossier") ; la
+//  fleche de la solution, elle, respecte l'echelle des forces donnee.
+// =====================================================================
+var MASSE_CHARGE_KG      = 500;
+var G                    = 9.81;
+var ECHELLE_FORCE_M_PAR_N = 0.01 / 200;   // 200 N pour 1 cm
+var TOL_ANGLE_FORCE      = 20;            // degres
+var LONGUEUR_MIN_FORCE   = 0.020;         // trace en dessous : trop court, on l'ignore
+
+function pointParLettre(lettre) {
+  return points.filter(function (p) { return p.lettre === lettre; })[0] || null;
+}
+
+// "Vers le bas" exprime dans le repere de l'ancre (donc suit une eventuelle
+// rotation du systeme au grip, puisque calcule a partir de racine.matrix
+// a chaque appel plutot que fige une fois pour toutes).
+function directionBasAncre() {
+  return new THREE.Vector3(0, -1, 0).transformDirection(racine.matrix).normalize();
+}
+
+// Fleche 3D (cylindre + cone), comme dans app.js. Positions attendues dans
+// le repere de l'objet parent (ici toujours l'ancre, pour suivre le systeme).
+function creerFleche(couleur, rayon) {
+  var g = new THREE.Group();
+  var mat = new THREE.MeshBasicMaterial({ color: couleur, depthTest: false, transparent: true, opacity: 1 });
+  var corps = new THREE.Mesh(new THREE.CylinderGeometry(rayon, rayon, 1, 10), mat);
+  var tete = new THREE.Mesh(new THREE.ConeGeometry(rayon * 2.8, rayon * 8, 12), mat);
+  corps.renderOrder = 890; tete.renderOrder = 890;
+  g.add(corps); g.add(tete);
+  g.userData = { corps: corps, tete: tete, mat: mat, rayon: rayon };
+  return g;
+}
+function majFleche(f, depuis, vers) {
+  var dir = vers.clone().sub(depuis);
+  var longueur = dir.length();
+  if (longueur < 1e-5) { f.visible = false; return; }
+  f.visible = true;
+  dir.normalize();
+  var d = f.userData;
+  var lTete = Math.min(d.rayon * 8, longueur * 0.45);
+  var lCorps = longueur - lTete;
+  d.corps.scale.set(1, Math.max(lCorps, 1e-4), 1);
+  d.corps.position.set(0, lCorps / 2, 0);
+  d.tete.scale.set(1, lTete / (d.rayon * 8), 1);
+  d.tete.position.set(0, lCorps + lTete / 2, 0);
+  f.position.copy(depuis);
+  f.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+}
+
+var traceForce         = null;   // { fleche, origine, direction } pendant/apres le trace
+var manetteActiveForce = -1;
+var flecheSolutionForce = null, etiquetteSolutionForce = null;
+
+function recommencerForce() {
+  if (traceForce) { anchor.remove(traceForce.fleche); traceForce = null; }
+  if (flecheSolutionForce) { anchor.remove(flecheSolutionForce); flecheSolutionForce = null; }
+  if (etiquetteSolutionForce) { anchor.remove(etiquetteSolutionForce); etiquetteSolutionForce = null; }
+  manetteActiveForce = -1;
+  majPanneauForces(null);
+}
+
+function validerForce() {
+  if (!traceForce || !traceForce.direction) {
+    majPanneauForces('Trace d\'abord le vecteur : vise le point H, gachette maintenue, tire vers le bas, relache.');
+    return;
+  }
+  var attendue = directionBasAncre();
+  var cos = THREE.MathUtils.clamp(traceForce.direction.dot(attendue), -1, 1);
+  var angle = THREE.MathUtils.radToDeg(Math.acos(cos));
+  var juste = angle <= TOL_ANGLE_FORCE;
+  var presque = !juste && angle <= TOL_ANGLE_FORCE * 2;
+
+  var VERT = '#3ddc84', ORANGE = '#ffb020', ROUGE = '#ff5f5f';
+  var corps = [];
+  if (juste) {
+    traceForce.fleche.userData.mat.color.set(0x3ddc84);
+    corps.push({ texte: 'Direction correcte (ecart ' + Math.round(angle) + '°).', couleur: VERT });
+  } else if (presque) {
+    traceForce.fleche.userData.mat.color.set(0xffb020);
+    corps.push({ texte: 'Presque : ecart de ' + Math.round(angle) + '° avec la verticale.', couleur: ORANGE });
+  } else {
+    traceForce.fleche.userData.mat.color.set(0xff5f5f);
+    corps.push({ texte: 'Direction incorrecte (ecart ' + Math.round(angle) + '°).', couleur: ROUGE });
+    corps.push({ texte: 'Le poids d\'une charge est toujours vertical, dirige vers le bas.', couleur: '#9fd0ff' });
+  }
+
+  dessinerPanneau('Modélisation des forces — résultat', corps, [
+    bouton(0, 0, 'RECOMMENCER',      '#7d4f2f', recommencerForce),
+    bouton(0, 1, 'VOIR LA SOLUTION', '#2f7d4f', afficherSolutionForce)
+  ]);
+}
+
+function afficherSolutionForce() {
+  if (traceForce) { traceForce.fleche.userData.mat.opacity = 0.35; }
+  if (flecheSolutionForce) { anchor.remove(flecheSolutionForce); }
+  if (etiquetteSolutionForce) { anchor.remove(etiquetteSolutionForce); }
+
+  var pt = pointParLettre('H');
+  if (!pt || !pt.pos) return;
+  var origine = versAncre(projeterLocal(pt.pos));
+  var dir = directionBasAncre();
+  var poidsN = MASSE_CHARGE_KG * G;
+  var longueur = poidsN * ECHELLE_FORCE_M_PAR_N;
+  var bout = origine.clone().add(dir.clone().multiplyScalar(longueur));
+
+  flecheSolutionForce = creerFleche(0x3ddc84, 0.005);
+  anchor.add(flecheSolutionForce);
+  majFleche(flecheSolutionForce, origine, bout);
+
+  etiquetteSolutionForce = creerEtiquette('P ≈ ' + Math.round(poidsN) + ' N', '#7dffb0');
+  etiquetteSolutionForce.position.copy(bout).add(new THREE.Vector3(0.035, 0, 0));
+  anchor.add(etiquetteSolutionForce);
+
+  dessinerPanneau('Modélisation des forces — solution', [
+    { texte: 'Poids de la charge : P = m·g = ' + MASSE_CHARGE_KG + ' × ' + G + ' ≈ ' + Math.round(poidsN) + ' N', couleur: '#dfeaf5' },
+    { texte: 'Vecteur vertical, vers le bas, applique au point H (charge sur la chape).', couleur: '#dfeaf5' },
+    { texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' }
+  ], [
+    bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerForce)
+  ]);
+}
+
+function majPanneauForces(message) {
+  var corps = [
+    'Trace la direction du poids de la charge : vise le point H (repere bleu), gachette maintenue, tire vers le bas, relache.',
+    '',
+    { texte: (traceForce && traceForce.direction) ? 'Vecteur trace.' : 'Pas encore trace.', couleur: '#9fd0ff' },
+    { texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' }
+  ];
+  if (message) corps.push({ texte: message, couleur: '#ff9f4a' });
+
+  dessinerPanneau('Modélisation des forces', corps, [
+    bouton(0, 0, 'VALIDER',     '#2f7d4f', validerForce),
+    bouton(0, 1, 'RECOMMENCER', '#7d4f2f', recommencerForce)
+  ]);
+}
+
+function passerEnForces() {
+  etape = 'forces';
+  panneauPalette.visible = false;
+  panneau.visible = true;
+  majPanneauForces(null);
 }
 
 // =====================================================================
@@ -824,7 +976,7 @@ function majPanneau(message) {
   ];
   if (message) corps.push({ texte: message, couleur: '#ff9f4a' });
 
-  dessinerPanneau('Editeur de liaisons', corps, [
+  dessinerPanneau('Modélisation du système', corps, [
     bouton(0, 0, '< PRECEDENT',   '#3a5f8a', precedent),
     bouton(0, 1, 'SUIVANT >',     '#3a5f8a', suivant),
     bouton(0, 2, 'AJOUTER POINT', '#4a4a4a', ajouterPoint),
@@ -896,6 +1048,18 @@ controllers.forEach(function (ctrl, idx) {
       return;
     }
 
+    if (etape === 'forces') {
+      if (traceForce) return;   // deja en cours (2e appui accidentel) : on ignore
+      var pt = pointParLettre('H');
+      if (!pt || !pt.pos) { majPanneauForces('Le point H (charge) n\'a pas ete place a l\'etape precedente.'); return; }
+      var origineF = versAncre(projeterLocal(pt.pos));
+      var f = creerFleche(0xffd400, 0.0045);
+      anchor.add(f);
+      traceForce = { fleche: f, origine: origineF, direction: null };
+      manetteActiveForce = idx;
+      return;
+    }
+
     // etape === 'liaisons' : poser le point courant a l'endroit vise.
     if (derniereVisee) {
       var i = courant;
@@ -914,6 +1078,26 @@ controllers.forEach(function (ctrl, idx) {
     } else {
       majPanneau('Vise une surface du modele avec le rayon bleu.');
     }
+  });
+
+  // Fin du trace du vecteur force (etape 3) : releve la position finale et
+  // fige la fleche telle quelle (trait "grossier", pas d'accrochage).
+  ctrl.addEventListener('selectend', function () {
+    if (etape !== 'forces' || !traceForce || manetteActiveForce !== idx) return;
+    var wp = new THREE.Vector3();
+    ctrl.getWorldPosition(wp);
+    var pAncre = versAncre(projeterLocal(racine.worldToLocal(wp)));
+    if (traceForce.origine.distanceTo(pAncre) < LONGUEUR_MIN_FORCE) {
+      anchor.remove(traceForce.fleche);
+      traceForce = null;
+      manetteActiveForce = -1;
+      majPanneauForces('Trace trop court, recommence.');
+      return;
+    }
+    majFleche(traceForce.fleche, traceForce.origine, pAncre);
+    traceForce.direction = pAncre.clone().sub(traceForce.origine).normalize();
+    manetteActiveForce = -1;
+    majPanneauForces(null);
   });
 
   // Grip (prehension) : attraper le GROUPE des 2 panneaux (ils bougent
@@ -1048,6 +1232,15 @@ renderer.setAnimationLoop(function (t, frame) {
   // Visee continue avec la premiere manette active (celle qui bouge).
   if (anchorPlaced && modeleCharge) {
     majVisee(controllers[0].visible === false ? controllers[1] : controllers[0]);
+  }
+
+  // Trace du vecteur force (etape 3) : la fleche suit la manette active
+  // tant que la gachette reste enfoncee.
+  if (traceForce && manetteActiveForce >= 0) {
+    var wpF = new THREE.Vector3();
+    controllers[manetteActiveForce].getWorldPosition(wpF);
+    var pAncreF = versAncre(projeterLocal(racine.worldToLocal(wpF)));
+    majFleche(traceForce.fleche, traceForce.origine, pAncreF);
   }
 
   // Le groupe de panneaux ne suit JAMAIS le systeme : sa position ne
