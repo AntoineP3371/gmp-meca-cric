@@ -324,6 +324,23 @@ function viderGroupe(g) {
   }
 }
 
+// Barre 3D entre deux points MONDE (un cylindre, pas une THREE.Line : le
+// "linewidth" d'une Line n'est pas respecte par la plupart des GPU, un
+// cylindre est le seul moyen fiable d'avoir un trait vraiment epais).
+var RAYON_FILAIRE = 0.007;
+function creerBarre(p1, p2, couleur, rayon) {
+  var longueur = p1.distanceTo(p2);
+  if (longueur < 1e-5) return null;
+  var barre = new THREE.Mesh(
+    new THREE.CylinderGeometry(rayon, rayon, longueur, 10),
+    new THREE.MeshBasicMaterial({ color: couleur, depthTest: false })
+  );
+  barre.position.copy(p1).lerp(p2, 0.5);
+  barre.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), p2.clone().sub(p1).normalize());
+  barre.renderOrder = 880;
+  return barre;
+}
+
 // Reconstruit entierement les projections et la structure filaire a partir
 // des points actuellement places. Appelee a chaque point pose et a chaque
 // changement de couleur (le filaire reprend la couleur de chaque solide).
@@ -374,12 +391,8 @@ function majProjectionEtFilaire() {
 
       for (var i = 0; i < lettres.length; i++) {
         for (var j = i + 1; j < lettres.length; j++) {
-          var seg = new THREE.Line(
-            new THREE.BufferGeometry().setFromPoints([projMonde[lettres[i]], projMonde[lettres[j]]]),
-            new THREE.LineBasicMaterial({ color: couleur, depthTest: false })
-          );
-          seg.renderOrder = 880;
-          groupeFilaire.add(seg);
+          var barre = creerBarre(projMonde[lettres[i]], projMonde[lettres[j]], couleur, RAYON_FILAIRE);
+          if (barre) groupeFilaire.add(barre);
         }
       }
     });
@@ -670,8 +683,20 @@ function ajouterPoint() {
 }
 
 // =====================================================================
-//  ENREGISTREMENT (POST vers le serveur local)
+//  ENREGISTREMENT
+//  POST vers le serveur local s'il existe (usage avec serveur.bat), sinon
+//  telechargement direct du fichier depuis le navigateur (hebergement
+//  statique type GitHub Pages, qui n'a pas de serveur pour repondre).
 // =====================================================================
+function telechargerJSON(nomFichier, donnees) {
+  var blob = new Blob([JSON.stringify(donnees, null, 2)], { type: 'application/json' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = nomFichier;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+}
+
 function enregistrer() {
   var donnees = {
     modele: MODELE,
@@ -693,18 +718,40 @@ function enregistrer() {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(donnees)
-  }).then(function (r) { return r.json(); }).then(function (r) {
+  }).then(function (r) {
+    var typeContenu = r.headers.get('content-type') || '';
+    if (!r.ok || typeContenu.indexOf('json') < 0) throw new Error('pas de serveur local');
+    return r.json();
+  }).then(function (r) {
     if (r.ok) {
       majPanneau(nbPlaces() + ' / ' + points.length + ' points enregistres dans\npoints-liaisons.json.');
+      afficherResultatFinal();
     } else {
       majPanneau('Erreur d\'enregistrement : ' + r.erreur);
     }
-  }).catch(function (e) {
-    majPanneau('Erreur reseau : ' + e.message + '\n(le serveur local repond-il ?)');
+  }).catch(function () {
+    // Pas de serveur local (ex: GitHub Pages) : on telecharge le fichier.
+    telechargerJSON('points-liaisons.json', donnees);
+    majPanneau(nbPlaces() + ' / ' + points.length + ' points enregistres.\nFichier telecharge : points-liaisons.json\n(regarde les telechargements du navigateur)');
+    afficherResultatFinal();
   });
 }
 
 function round4(v) { return Math.round(v * 10000) / 10000; }
+
+// Une fois les points enregistres, on efface le modele reel (juste garde
+// comme repere tres estompe) pour laisser voir clairement la structure
+// filaire, qui est le vrai resultat de l'exercice.
+var OPACITE_MODELE_ESTOMPE = 0.10;
+function afficherResultatFinal() {
+  piecesModele.forEach(function (p) {
+    p.meshes.forEach(function (m) {
+      m.material.transparent = true;
+      m.material.opacity = OPACITE_MODELE_ESTOMPE;
+      m.material.depthWrite = false;   // evite qu'il masque le filaire derriere lui
+    });
+  });
+}
 
 // =====================================================================
 //  PANNEAU EN MODE PLACEMENT
