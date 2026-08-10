@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<title>Apercu bureau - Editeur de liaisons</title>
+<style>
+  body{margin:0;background:#0c0e14;color:#ddd;font-family:sans-serif;overflow:hidden;}
+  #ui{position:fixed;top:8px;left:8px;background:rgba(0,0,0,0.6);padding:8px 12px;border-radius:8px;font-size:12px;z-index:5;}
+  #ui button{margin:2px;padding:6px 10px;font-size:12px;background:#2a3040;color:#fff;border:1px solid #445;border-radius:6px;cursor:pointer;}
+  #ui button.actif{background:#e0245e;}
+  canvas{display:block;}
+</style>
+</head><body>
+<div id="ui">
+  <div><b>Apercu bureau</b> (simule le resultat final de chaque etape, sans casque)</div>
+  <button id="b1">1. Coloriage</button>
+  <button id="b2">2. Liaisons + filaire</button>
+  <button id="b3">3. + Poids (P)</button>
+  <button id="b4">4. + Isolement chape</button>
+  <div style="margin-top:6px;color:#9ab;">Glisser = tourner &nbsp;•&nbsp; molette = zoom</div>
+</div>
+<script src="three.min.js"></script>
+<script src="GLTFLoader.js"></script>
+<script>
+var renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+var scene = new THREE.Scene();
+scene.add(new THREE.AmbientLight(0xffffff,1.7));
+var dl=new THREE.DirectionalLight(0xffffff,1); dl.position.set(1,2,1); scene.add(dl);
+var camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.01, 20);
+
+// --- rotation/zoom a la souris (mini-orbit maison, three.min.js n'a pas OrbitControls) ---
+var cible = new THREE.Vector3(0,0.05,0), rayon=0.9, theta=0.6, phi=1.1;
+function majCamera(){
+  camera.position.set(
+    cible.x + rayon*Math.sin(phi)*Math.sin(theta),
+    cible.y + rayon*Math.cos(phi),
+    cible.z + rayon*Math.sin(phi)*Math.cos(theta)
+  );
+  camera.lookAt(cible);
+}
+majCamera();
+var dragging=false, lastX=0, lastY=0;
+renderer.domElement.addEventListener('pointerdown', function(e){dragging=true;lastX=e.clientX;lastY=e.clientY;});
+window.addEventListener('pointerup', function(){dragging=false;});
+window.addEventListener('pointermove', function(e){
+  if(!dragging) return;
+  theta -= (e.clientX-lastX)*0.008;
+  phi = Math.max(0.15, Math.min(Math.PI-0.15, phi - (e.clientY-lastY)*0.008));
+  lastX=e.clientX; lastY=e.clientY;
+  majCamera();
+});
+renderer.domElement.addEventListener('wheel', function(e){
+  rayon = Math.max(0.25, Math.min(3, rayon + e.deltaY*0.001));
+  majCamera();
+  e.preventDefault();
+}, {passive:false});
+
+function baseName(n){ return n.split('_<')[0].split(' <')[0]; }
+
+var racine, medianZ_local, piecesModele=[], groupeAffichage=new THREE.Group();
+scene.add(groupeAffichage);
+
+function versLocalPlan(p){ return new THREE.Vector3(p.x,p.y,medianZ_local); }
+
+function creerFleche(couleur, rayon2) {
+  var g = new THREE.Group();
+  var mat = new THREE.MeshBasicMaterial({ color: couleur });
+  var corps = new THREE.Mesh(new THREE.CylinderGeometry(rayon2, rayon2, 1, 10), mat);
+  var tete = new THREE.Mesh(new THREE.ConeGeometry(rayon2*2.8, rayon2*8, 12), mat);
+  g.add(corps); g.add(tete); g.userData={corps:corps,tete:tete,rayon:rayon2};
+  return g;
+}
+function majFleche(f, depuis, vers){
+  var dir=vers.clone().sub(depuis), L=dir.length(); if(L<1e-6){f.visible=false;return;}
+  f.visible=true; dir.normalize();
+  var d=f.userData, lTete=Math.min(d.rayon*8,L*0.45), lCorps=L-lTete;
+  d.corps.scale.set(1,Math.max(lCorps,1e-4),1); d.corps.position.set(0,lCorps/2,0);
+  d.tete.scale.set(1,lTete/(d.rayon*8),1); d.tete.position.set(0,lCorps+lTete/2,0);
+  f.position.copy(depuis); f.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),dir);
+}
+function creerBarre(p1,p2,couleur,rayon2){
+  var L=p1.distanceTo(p2); if(L<1e-5) return null;
+  var b=new THREE.Mesh(new THREE.CylinderGeometry(rayon2,rayon2,L,10), new THREE.MeshBasicMaterial({color:couleur}));
+  b.position.copy(p1).lerp(p2,0.5);
+  b.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), p2.clone().sub(p1).normalize());
+  return b;
+}
+function pointsSommets(noeud, pas){
+  var pts=[]; noeud.traverse(function(n){
+    if(!n.isMesh||!n.geometry) return;
+    var pos=n.geometry.attributes.position, p=Math.max(1,Math.floor(pos.count/pas)), tmp=new THREE.Vector3();
+    for(var i=0;i<pos.count;i+=p){ tmp.fromBufferAttribute(pos,i); var w=tmp.clone(); n.localToWorld(w); pts.push(w); }
+  });
+  return pts;
+}
+function contact(g1,g2){
+  var min=1e9,m=null;
+  for(var i=0;i<g1.length;i++) for(var j=0;j<g2.length;j++){ var d=g1[i].distanceToSquared(g2[j]); if(d<min){min=d;m=g1[i].clone().add(g2[j]).multiplyScalar(0.5);} }
+  return m;
+}
+
+Promise.all([
+  fetch('classes.json').then(r=>r.json()),
+  new Promise(function(res,rej){ new THREE.GLTFLoader().load('cric-v1.glb', res, undefined, rej); })
+]).then(function(results){
+  var classesDef = results[0], gltf = results[1];
+  racine = gltf.scene;
+  var b=new THREE.Box3().setFromObject(racine), t=new THREE.Vector3(); b.getSize(t);
+  var m=Math.max(t.x,t.y,t.z); racine.scale.setScalar(0.55/m);
+  scene.add(racine);
+  racine.position.set(0,0.01,0);
+  racine.updateMatrixWorld(true);
+
+  var sousEns = racine.children[0].children;
+  sousEns.forEach(function(noeud){
+    var meshes=[]; noeud.traverse(function(n){ if(n.isMesh) meshes.push(n); });
+    if(!meshes.length) return;
+    meshes.forEach(function(mm){ mm.material = new THREE.MeshStandardMaterial({color:0x9aa4b5,metalness:0.15,roughness:0.7}); });
+    piecesModele.push({nomBase:baseName(noeud.name), noeud:noeud, meshes:meshes});
+  });
+
+  var paire = piecesModele.filter(function(p){return p.nomBase==='Bras_inférieur';});
+  var a=new THREE.Vector3(), bb=new THREE.Vector3();
+  paire[0].noeud.getWorldPosition(a); paire[1].noeud.getWorldPosition(bb);
+  racine.worldToLocal(a); racine.worldToLocal(bb);
+  medianZ_local=(a.z+bb.z)/2;
+  function versAncre(p){ return p.clone().applyMatrix4(racine.matrix); }
+
+  // --- points de contact approx (B,D,C,H) ---
+  var brasInf=piecesModele.filter(p=>p.nomBase==='Bras_inférieur')[0].noeud;
+  var chape=piecesModele.filter(p=>p.nomBase==='chape_2')[0].noeud;
+  var brasSup=piecesModele.filter(p=>p.nomBase==='bras_assemblé')[0].noeud;
+  var chassis=piecesModele.filter(p=>p.nomBase==='Châssis')[0].noeud;
+  var levier=piecesModele.filter(p=>p.nomBase==='Levier_droite')[0].noeud;
+  var verinP=piecesModele.filter(p=>p.nomBase==='Nez_de_vérin')[0].noeud;
+
+  var ptsBrasInf=pointsSommets(brasInf,400), ptsChape=pointsSommets(chape,400),
+      ptsBrasSup=pointsSommets(brasSup,400), ptsChassis=pointsSommets(chassis,1500),
+      ptsLevier=pointsSommets(levier,300), ptsVerin=pointsSommets(verinP,300);
+
+  var B_m = contact(ptsBrasInf, ptsChassis);
+  var D_m = contact(ptsBrasInf, ptsChape);
+  var C_m = contact(ptsBrasSup, ptsChape);
+  var A_m = contact(ptsBrasSup, ptsChassis);
+  var G_m = contact(levier?ptsLevier:[], ptsBrasSup);
+  var F_m = contact(ptsLevier, ptsVerin);
+  var E_m = contact(ptsVerin, ptsChassis);
+  var H_ancre = versAncre(versLocalPlan(racine.worldToLocal(new THREE.Vector3().copy((function(){var c=new THREE.Vector3(); chape.getWorldPosition(c); return c;})()))));
+
+  var lettres = {
+    A: versAncre(versLocalPlan(racine.worldToLocal(A_m.clone()))),
+    B: versAncre(versLocalPlan(racine.worldToLocal(B_m.clone()))),
+    C: versAncre(versLocalPlan(racine.worldToLocal(C_m.clone()))),
+    D: versAncre(versLocalPlan(racine.worldToLocal(D_m.clone()))),
+    E: versAncre(versLocalPlan(racine.worldToLocal(E_m.clone()))),
+    F: versAncre(versLocalPlan(racine.worldToLocal(F_m.clone()))),
+    G: versAncre(versLocalPlan(racine.worldToLocal(G_m.clone()))),
+    H: H_ancre
+  };
+  var cotesParLettre = {
+    A:['bati','bras_superieur'], B:['bati','bras_inferieur'], C:['chape','bras_superieur'],
+    D:['chape','bras_inferieur'], E:['verin','bati'], F:['verin','levier'], G:['levier','bras_superieur'],
+    H:['charge','chape']
+  };
+
+  function mappeClasse(){ var m2={}; classesDef.classes.forEach(function(c){c.pieces.forEach(function(nb){m2[nb]=c.id;});}); return m2; }
+  var classeAttendue = mappeClasse();
+  var PALETTE = {bati:0xe6194b, verin:0xf58231, bras_inferieur:0x3cb44b, levier:0x4363d8, bras_superieur:0x911eb4, chape:0xff6bc0};
+
+  var groupePoints = new THREE.Group(), groupeFilaire = new THREE.Group(), groupeForces = new THREE.Group();
+  scene.add(groupePoints); scene.add(groupeFilaire); scene.add(groupeForces);
+
+  function afficherColoriage(){
+    piecesModele.forEach(function(p){
+      var cid = classeAttendue[p.nomBase];
+      var couleur = cid ? PALETTE[cid] : 0x9aa4b5;
+      p.meshes.forEach(function(mm){ mm.material.color.set(couleur); mm.material.opacity=1; mm.material.transparent=false; });
+    });
+    groupePoints.clear(); groupeFilaire.clear(); groupeForces.clear();
+  }
+
+  function afficherLiaisons(){
+    afficherColoriage();
+    Object.keys(lettres).forEach(function(l){
+      var s=new THREE.Mesh(new THREE.SphereGeometry(0.006,14,14), new THREE.MeshBasicMaterial({color:0x3ddc84}));
+      s.position.copy(lettres[l]); groupePoints.add(s);
+    });
+    var parClasse={};
+    Object.keys(cotesParLettre).forEach(function(l){ cotesParLettre[l].forEach(function(cid){ (parClasse[cid]=parClasse[cid]||[]).push(l); }); });
+    classesDef.classes.forEach(function(c){
+      var ls=parClasse[c.id]||[]; var couleur=PALETTE[c.id]||0xffffff;
+      for(var i=0;i<ls.length;i++) for(var j=i+1;j<ls.length;j++){
+        var barre=creerBarre(lettres[ls[i]], lettres[ls[j]], couleur, 0.0022);
+        if(barre) groupeFilaire.add(barre);
+      }
+    });
+    piecesModele.forEach(function(p){ p.meshes.forEach(function(mm){ mm.material.transparent=true; mm.material.opacity=0.10; mm.material.depthWrite=false; }); });
+  }
+
+  function afficherForces(){
+    afficherLiaisons();
+    var poidsN = 500*9.81, echelle=0.01/200, L=poidsN*echelle;
+    var dirBas = new THREE.Vector3(0,-1,0).transformDirection(racine.matrix).normalize();
+    var f=creerFleche(0x3ddc84, 0.0028);
+    groupeForces.add(f);
+    majFleche(f, lettres.H, lettres.H.clone().add(dirBas.clone().multiplyScalar(L)));
+  }
+
+  function afficherChape(){
+    afficherForces();
+    piecesModele.forEach(function(p){ if(p.nomBase==='chape_2') p.meshes.forEach(function(mm){mm.material.opacity=1;}); });
+    var dirBD = lettres.D.clone().sub(lettres.B).normalize();
+    var dirBas = new THREE.Vector3(0,-1,0).transformDirection(racine.matrix).normalize();
+    function inter(P1,D1,P2,D2){
+      var den=D1.x*D2.y-D1.y*D2.x; if(Math.abs(den)<1e-9) return null;
+      var dx=P2.x-P1.x, dy=P2.y-P1.y, t=(dx*D2.y-dy*D2.x)/den;
+      return new THREE.Vector3(P1.x+t*D1.x, P1.y+t*D1.y, P1.z);
+    }
+    var concours = inter(lettres.D, dirBD, lettres.H, dirBas);
+    var guideBD = creerBarre(lettres.B.clone().sub(dirBD.clone().multiplyScalar(0.05)), lettres.D.clone().add(dirBD.clone().multiplyScalar(0.05)), 0x35c9ff, 0.0011);
+    groupeForces.add(guideBD);
+    var dirC = concours.clone().sub(lettres.C).normalize();
+    var guideC = creerBarre(lettres.C.clone().sub(dirC.clone().multiplyScalar(0.02)), concours.clone().add(dirC.clone().multiplyScalar(0.02)), 0x35c9ff, 0.0011);
+    groupeForces.add(guideC);
+    var mConcours = new THREE.Mesh(new THREE.SphereGeometry(0.006,14,14), new THREE.MeshBasicMaterial({color:0xffd400}));
+    mConcours.position.copy(concours);
+    groupeForces.add(mConcours);
+  }
+
+  document.getElementById('b1').onclick=function(){setActif(1); afficherColoriage();};
+  document.getElementById('b2').onclick=function(){setActif(2); afficherLiaisons();};
+  document.getElementById('b3').onclick=function(){setActif(3); afficherForces();};
+  document.getElementById('b4').onclick=function(){setActif(4); afficherChape();};
+  function setActif(n){ [1,2,3,4].forEach(function(i){ document.getElementById('b'+i).className = (i===n)?'actif':''; }); }
+
+  setActif(2); afficherLiaisons();
+
+  renderer.setAnimationLoop(function(){ renderer.render(scene,camera); });
+}).catch(function(e){ document.getElementById('ui').innerHTML = 'ERREUR : '+e; });
+</script>
+</body></html>
