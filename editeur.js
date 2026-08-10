@@ -62,6 +62,21 @@ var meshesModele = [];     // pour le raycast de placement/visee (toutes les pie
 anchor.visible = false;
 scene.add(anchor);
 
+// --- Annulation (pile LIFO, partagee entre les deux etapes) -------------
+var pileAnnulation = [];
+function pousserAnnulation(fn) {
+  pileAnnulation.push(fn);
+  if (pileAnnulation.length > 50) pileAnnulation.shift();
+}
+function annulerDerniere() {
+  if (!pileAnnulation.length) {
+    if (etape === 'coloriage') majPanneauColoriage('Rien a annuler.');
+    else majPanneau('Rien a annuler.');
+    return;
+  }
+  pileAnnulation.pop()();
+}
+
 // --- Etapes : 'coloriage' (si classes.json est charge) puis 'liaisons' -
 var etape = 'coloriage';
 
@@ -122,16 +137,21 @@ var courant = 0;
 // =====================================================================
 //  PANNEAU (texture canvas), meme principe que app.js
 // =====================================================================
-var PW = 1024, PH = 700;
+// PH agrandi (700 -> 820) pour loger une 3e rangee de boutons (etape liaisons).
+var PW = 1024, PH = 820;
 var pc = document.createElement('canvas'); pc.width = PW; pc.height = PH;
 var px = pc.getContext('2d');
 var ptex = new THREE.CanvasTexture(pc);
 var panneau = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.60, 0.41),
+  new THREE.PlaneGeometry(0.60, 0.60 * PH / PW),
   new THREE.MeshBasicMaterial({ map: ptex, transparent: true })
 );
 panneau.visible = false;
 scene.add(panneau);
+
+// Decalage panneau <-> ancre (repere du monde, pas tourne). Modifiable en
+// attrapant le panneau a la gachette de prehension (voir squeezestart).
+var offsetPanneau = new THREE.Vector3(0, 0.60, 0);
 
 var boutons = [];
 
@@ -258,6 +278,26 @@ function demarrerEtape() {
   else passerEnPlacement();
 }
 
+// Redemarre l'etape EN COURS (sans reinitialiser coloriage/liaisons deja
+// faits) : utilise apres un "DEPLACER LE MODELE", contrairement a
+// demarrerEtape() qui ne sert qu'au tout premier placement.
+function reprendreEtape() {
+  if (etape === 'coloriage') passerEnColoriage();
+  else passerEnPlacement();
+}
+
+// Deplace le modele deja pose : on repasse en mode reticule/hit-test sans
+// rien perdre (points et couleurs sont stockes independamment de la
+// position de l'ancre). Le prochain appui gachette fige la nouvelle place.
+var deplacementEnCours = false;
+function deplacerSysteme() {
+  deplacementEnCours = true;
+  anchorPlaced = false;
+  panneau.visible = false;
+  panneauPalette.visible = false;
+  reticulePlacement.visible = false;
+}
+
 function chargerModele() {
   loader.load(MODELE, function (gltf) {
     racine = gltf.scene;
@@ -327,7 +367,7 @@ function viderGroupe(g) {
 // Barre 3D entre deux points MONDE (un cylindre, pas une THREE.Line : le
 // "linewidth" d'une Line n'est pas respecte par la plupart des GPU, un
 // cylindre est le seul moyen fiable d'avoir un trait vraiment epais).
-var RAYON_FILAIRE = 0.007;
+var RAYON_FILAIRE = 0.0035;
 function creerBarre(p1, p2, couleur, rayon) {
   var longueur = p1.distanceTo(p2);
   if (longueur < 1e-5) return null;
@@ -420,6 +460,8 @@ var panneauPalette = new THREE.Mesh(
 panneauPalette.visible = false;
 scene.add(panneauPalette);
 
+var offsetPalette = new THREE.Vector3(0, 0.20, 0);
+
 var boutonsPalette = [];
 var PALETTE_COLS = 6;
 
@@ -464,6 +506,13 @@ function selectionnerCouleur(hex) {
 function peindrePiece(idx) {
   if (couleurActive === null) { majPanneauColoriage('Choisis d\'abord une couleur dans la palette, en bas.'); return; }
   var piece = piecesModele[idx];
+  var ancienneCouleur = piece.couleur;
+  pousserAnnulation(function () {
+    piece.couleur = ancienneCouleur;
+    piece.meshes.forEach(function (m) { m.material.color.setHex(ancienneCouleur === null ? COULEUR_NEUTRE : ancienneCouleur); });
+    majPanneauColoriage(null);
+    majProjectionEtFilaire();
+  });
   piece.couleur = couleurActive;
   piece.meshes.forEach(function (m) { m.material.color.setHex(couleurActive); });
   majPanneauColoriage(null);
@@ -473,6 +522,15 @@ function peindrePiece(idx) {
 function nbPiecesColoriees() { return piecesModele.filter(function (p) { return p.couleur !== null; }).length; }
 
 function effacerColoriageTout() {
+  var etatPrecedent = piecesModele.map(function (p) { return p.couleur; });
+  pousserAnnulation(function () {
+    piecesModele.forEach(function (p, i) {
+      p.couleur = etatPrecedent[i];
+      p.meshes.forEach(function (m) { m.material.color.setHex(etatPrecedent[i] === null ? COULEUR_NEUTRE : etatPrecedent[i]); });
+    });
+    majPanneauColoriage(null);
+    majProjectionEtFilaire();
+  });
   piecesModele.forEach(function (p) { p.couleur = null; p.meshes.forEach(function (m) { m.material.color.setHex(COULEUR_NEUTRE); }); });
   majPanneauColoriage(null);
   majProjectionEtFilaire();
@@ -576,7 +634,9 @@ function majPanneauColoriage(message) {
 
   dessinerPanneau('Étape 1 — Coloriage des solides', corps, [
     bouton(0, 0, 'VALIDER',      '#2f7d4f', validerColoriage),
-    bouton(0, 1, 'TOUT EFFACER', '#7d4f2f', effacerColoriageTout)
+    bouton(0, 1, 'TOUT EFFACER', '#7d4f2f', effacerColoriageTout),
+    bouton(0, 2, 'ANNULER',      '#3a5f8a', annulerDerniere),
+    bouton(1, 0, 'DEPLACER', '#4a4a4a', deplacerSysteme)
   ]);
 }
 
@@ -665,6 +725,16 @@ function precedent() { allerA(courant - 1); }
 function suivant()   { allerA(courant + 1); }
 
 function supprimerCourant() {
+  var i = courant;
+  var ancienPos = points[i].pos;
+  if (!ancienPos) { majPanneau('Ce point n\'est pas encore place.'); return; }
+  var ancienMesh = points[i].meshProche;
+  pousserAnnulation(function () {
+    points[i].pos = ancienPos;
+    points[i].meshProche = ancienMesh;
+    majMarqueur(i);
+    allerA(i);
+  });
   points[courant].pos = null;
   points[courant].meshProche = null;
   majMarqueur(courant);
@@ -676,8 +746,18 @@ function ajouterPoint() {
   // cotes: [] -> ce point supplementaire n'est rattache a aucun solide
   // connu, il n'apparaitra donc pas dans la structure filaire (normal :
   // classes.json ne le connait pas).
-  points.push({ nom: '+' + n, lettre: '+' + n, cotes: [], pos: null, meshProche: null });
+  var nouveauPoint = { nom: '+' + n, lettre: '+' + n, cotes: [], pos: null, meshProche: null };
+  var ancienCourant = courant;
+  points.push(nouveauPoint);
   marqueurs.push(null);
+  pousserAnnulation(function () {
+    if (points[points.length - 1] !== nouveauPoint) return;   // deja modifie depuis : on n'annule pas a l'aveugle
+    points.pop();
+    var m = marqueurs.pop();
+    if (m) { scene.remove(m.sphere); scene.remove(m.etiquette); }
+    allerA(Math.min(ancienCourant, points.length - 1));
+    majProjectionEtFilaire();
+  });
   allerA(points.length - 1);
   majPanneau('Nouveau point ajoute. Vise sa position et appuie sur la gachette.');
 }
@@ -772,7 +852,9 @@ function majPanneau(message) {
     bouton(0, 1, 'SUIVANT >',     '#3a5f8a', suivant),
     bouton(0, 2, 'AJOUTER POINT', '#4a4a4a', ajouterPoint),
     bouton(1, 0, 'SUPPRIMER',     '#7d4f2f', supprimerCourant),
-    bouton(1, 1, 'ENREGISTRER',   '#2f7d4f', enregistrer)
+    bouton(1, 1, 'ENREGISTRER',   '#2f7d4f', enregistrer),
+    bouton(1, 2, 'ANNULER',       '#3a5f8a', annulerDerniere),
+    bouton(2, 0, 'DEPLACER', '#4a4a4a', deplacerSysteme)
   ]);
 }
 
@@ -790,6 +872,7 @@ function passerEnPlacement() {
 var controllers = [renderer.xr.getController(0), renderer.xr.getController(1)];
 var rayon = new THREE.Raycaster();
 var mat4 = new THREE.Matrix4();
+var grabs = [null, null];   // panneau ou panneauPalette actuellement tenu par chaque manette, ou null
 
 // Reticule : petit anneau qui suit le point vise sur le modele.
 var reticuleVisee = new THREE.Mesh(
@@ -816,13 +899,16 @@ controllers.forEach(function (ctrl, idx) {
   ctrl.add(ligne);
 
   ctrl.addEventListener('selectstart', function () {
-    // 1er appui : fige la position de l'apercu (deja visible et suivant le
-    // reticule depuis le chargement). Si le modele n'est pas encore charge
-    // (reseau lent), on attend juste qu'il le soit pour enchainer.
+    // 1er appui (ou reappui apres "DEPLACER LE MODELE") : fige la position
+    // de l'apercu (deja visible et suivant le reticule). Si le modele n'est
+    // pas encore charge (reseau lent), on attend juste qu'il le soit.
     if (!anchorPlaced) {
       anchorPlaced = true;
       reticulePlacement.visible = false;
-      if (modeleCharge) demarrerEtape(); else enAttentePassage = true;
+      if (modeleCharge) {
+        if (deplacementEnCours) { deplacementEnCours = false; reprendreEtape(); }
+        else demarrerEtape();
+      } else enAttentePassage = true;
       return;
     }
 
@@ -840,6 +926,15 @@ controllers.forEach(function (ctrl, idx) {
 
     // etape === 'liaisons' : poser le point courant a l'endroit vise.
     if (derniereVisee) {
+      var i = courant;
+      var ancienPos  = points[i].pos ? points[i].pos.clone() : null;
+      var ancienMesh = points[i].meshProche;
+      pousserAnnulation(function () {
+        points[i].pos = ancienPos;
+        points[i].meshProche = ancienMesh;
+        majMarqueur(i);
+        allerA(i);
+      });
       points[courant].pos = racine.worldToLocal(derniereVisee.point.clone());
       points[courant].meshProche = derniereVisee.nomMesh;
       majMarqueur(courant);
@@ -847,6 +942,37 @@ controllers.forEach(function (ctrl, idx) {
     } else {
       majPanneau('Vise une surface du modele avec le rayon bleu.');
     }
+  });
+
+  // Grip (prehension) : attraper un panneau flottant pour le repositionner
+  // librement, comme on attrape une piece dans l'app d'assemblage.
+  ctrl.addEventListener('squeezestart', function () {
+    mat4.identity().extractRotation(ctrl.matrixWorld);
+    rayon.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
+    rayon.ray.direction.set(0, 0, -1).applyMatrix4(mat4);
+
+    var cibles = [];
+    if (panneau.visible) cibles.push(panneau);
+    if (panneauPalette.visible) cibles.push(panneauPalette);
+    var hits = rayon.intersectObjects(cibles, false);
+    if (!hits.length) return;
+
+    grabs[idx] = hits[0].object;
+    ctrl.attach(hits[0].object);
+  });
+
+  ctrl.addEventListener('squeezeend', function () {
+    var cible = grabs[idx];
+    if (!cible) return;
+    scene.attach(cible);   // reparente a la scene SANS sauter (garde la position mondiale)
+
+    var wp = new THREE.Vector3();
+    cible.getWorldPosition(wp);
+    var offsetLocal = wp.clone().sub(anchor.position);
+    if (cible === panneau) offsetPanneau.copy(offsetLocal);
+    else if (cible === panneauPalette) offsetPalette.copy(offsetLocal);
+
+    grabs[idx] = null;
   });
 });
 
@@ -942,15 +1068,16 @@ renderer.setAnimationLoop(function (t, frame) {
     majVisee(controllers[0].visible === false ? controllers[1] : controllers[0]);
   }
 
-  // Palette plus grande (2 rangees de 6) : les deux panneaux sont ecartes
-  // pour ne pas se chevaucher (panneau : 0,41 m de haut : panneauPalette : 0,25 m).
-  if (panneau.visible && anchorPlaced) {
-    panneau.position.copy(anchor.position).add(new THREE.Vector3(0, 0.60, 0));
+  // Position par defaut (offsetPanneau/offsetPalette), sauf si le panneau
+  // est actuellement tenu par une manette (squeeze) : dans ce cas c'est
+  // ctrl.attach() qui gere sa position, on ne doit pas la reecrire ici.
+  if (panneau.visible && anchorPlaced && grabs[0] !== panneau && grabs[1] !== panneau) {
+    panneau.position.copy(anchor.position).add(offsetPanneau);
     camera.getWorldPosition(camPos);
     panneau.lookAt(camPos.x, panneau.position.y, camPos.z);
   }
-  if (panneauPalette.visible && anchorPlaced) {
-    panneauPalette.position.copy(anchor.position).add(new THREE.Vector3(0, 0.20, 0));
+  if (panneauPalette.visible && anchorPlaced && grabs[0] !== panneauPalette && grabs[1] !== panneauPalette) {
+    panneauPalette.position.copy(anchor.position).add(offsetPalette);
     camera.getWorldPosition(camPos);
     panneauPalette.lookAt(camPos.x, panneauPalette.position.y, camPos.z);
   }
