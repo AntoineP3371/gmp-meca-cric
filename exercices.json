@@ -1,0 +1,97 @@
+{
+  "_lisezmoi": [
+    "Definition des exercices de statique. Modifiable sans toucher au code.",
+    "",
+    "REPERE DES DIRECTIONS -----------------------------------------------",
+    "Les directions sont donnees dans un repere calcule automatiquement a",
+    "partir du modele 3D, donc valable quelle que soit la position de la",
+    "pince sur la table :",
+    "   origine = le pivot (axe de machoire)",
+    "   u = axe du levier, du pivot VERS la lame  -> dir [1, 0]",
+    "   w = perpendiculaire dans le plan du mecanisme, du cote du galet",
+    "                                              -> dir [0, 1]",
+    "Une direction s'ecrit [au, aw]. Exemples :",
+    "   [0, 1]   = perpendiculaire au levier, vers le galet",
+    "   [0, -1]  = perpendiculaire au levier, vers le cable",
+    "   [1, 1]   = a 45 degres (le code normalise tout seul)",
+    "",
+    "POINTS D'APPLICATION ------------------------------------------------",
+    "'point' designe une piece du modele par son identifiant NAUO (visible",
+    "dans l'arbre CAO). Le code place le point au centre de cette piece.",
+    "",
+    "TOLERANCES ----------------------------------------------------------",
+    "   tolAngle : ecart de direction accepte, en degres.",
+    "   Au-dela de 2 x tolAngle, la reponse est comptee fausse.",
+    "   tolPoint : distance acceptee au point d'application, en cm reels",
+    "              (a l'echelle d'affichage)."
+  ],
+
+  "exercices": [
+    {
+      "id": "pince-couteau-sup",
+      "modele": "pince.glb",
+      "titre": "Pince coupe-cable pneumatique",
+      "piece": "NAUO3",
+      "pieceNom": "le couteau superieur",
+      "question": "Isole le COUTEAU SUPERIEUR (en orange).\nTrace les vecteurs des actions mecaniques\nexterieures qu'il subit.\n\nLe poids et le ressort a lame sont negliges.",
+      "tolPoint": 4.0,
+      "tolAngle": 22,
+
+      "reperePivot": "NAUO30",
+      "repereLame": "NAUO8",
+      "repereGalet": "NAUO19",
+
+      "pointsCandidats": [
+        { "id": "NAUO30", "nom": "Axe de machoire" },
+        { "id": "NAUO19", "nom": "Axe de galet (couteau sup.)" },
+        { "id": "NAUO8",  "nom": "Cable a couper" },
+        { "id": "NAUO18", "nom": "Attache du ressort a lame" },
+        { "id": "NAUO5",  "nom": "Galet du couteau inferieur" },
+        { "id": "NAUO6",  "nom": "Piston" }
+      ],
+
+      "forces": [
+        {
+          "nom": "Action du galet sur l'axe de galet",
+          "symbole": "F(galet->couteau)",
+          "point": "NAUO19",
+          "dir": [0, 1],
+          "norme": 1.0,
+          "aide": "Le galet est une piece soumise a DEUX forces : l'action qu'il transmet passe par son centre."
+        },
+        {
+          "nom": "Action du cable sur la lame",
+          "symbole": "F(cable->couteau)",
+          "point": "NAUO8",
+          "dir": [0, 1],
+          "norme": 2.958,
+          "aide": "Le cable resiste a la coupe : il repousse la lame, donc vers le haut du levier."
+        },
+        {
+          "nom": "Action de l'axe de machoire (pivot)",
+          "symbole": "F(bati->couteau)",
+          "point": "NAUO30",
+          "dir": [0, -1],
+          "norme": 3.958,
+          "aide": "Liaison pivot : la reaction passe par l'axe. Son sens s'obtient par la resultante nulle."
+        }
+      ],
+
+      "correction": [
+        "Les trois forces sont perpendiculaires au levier : c'est un levier simple.",
+        "",
+        "Equilibre des moments au pivot B :",
+        "   F(cable) x BA  =  F(galet) x BC",
+        "ou BA et BC sont les BRAS DE LEVIER, c'est-a-dire les distances",
+        "du pivot a la LIGNE D'ACTION de chaque force (et non aux points).",
+        "Ici BA = 9,4 mm et BC = 27,8 mm, soit un rapport de 2,96 :",
+        "l'effort de coupe vaut environ 3 fois l'effort fourni par le galet.",
+        "",
+        "Equilibre des forces :",
+        "   F(bati) = - ( F(galet) + F(cable) )",
+        "d'ou une reaction du pivot dirigee vers le cable, de norme",
+        "environ 4 fois l'effort du galet."
+      ]
+    }
+  ]
+}

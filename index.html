@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Statique en realite mixte</title>
+  <style>
+    body { margin: 0; background: #000; }
+    #overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; text-align: center;
+      background: rgba(0,0,0,0.92); color: white; font-family: sans-serif;
+      z-index: 10; padding: 20px; box-sizing: border-box; overflow-y: auto;
+    }
+    .logos-bar {
+      display: flex; align-items: center; justify-content: center; gap: 26px;
+      background: #fff; border-radius: 16px; padding: 16px 26px; margin: 0 0 22px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+    }
+    .logos-bar img { height: 70px; width: auto; display: block; }
+    h1 { font-size: 22px; margin: 0 0 8px; }
+    p  { font-size: 13px; color: #aaa; margin: 0 0 16px; max-width: 420px; }
+    .btn { padding: 14px 30px; font-size: 17px; border: none; border-radius: 12px;
+           color: white; cursor: pointer; margin: 5px; background: #e0245e; }
+    .btn:disabled { background: #555; }
+    #status  { margin-top: 12px; font-size: 13px; color: #aaa; }
+    #errbox  { font-size: 11px; color: #ff6b6b; white-space: pre-wrap; max-width: 90vw; margin-top: 6px; }
+    #version { position: fixed; bottom: 8px; left: 0; right: 0; text-align: center;
+               font-size: 11px; color: #666; z-index: 11; }
+    canvas { display: block; position: fixed; inset: 0; width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <div class="logos-bar">
+      <img src="logo-gmp.png" alt="IUT GMP Bordeaux" onerror="this.style.display='none'"/>
+    </div>
+    <h1>Statique en realite mixte</h1>
+    <p>
+      Pose le mecanisme sur ta table, puis trace les vecteurs des actions
+      mecaniques avec la gachette de la manette.
+    </p>
+    <button class="btn" id="btnCommencer">Entrer en realite mixte</button>
+    <div id="status">Chargement...</div>
+    <div id="errbox"></div>
+    <div id="version">v1.0.0</div>
+  </div>
+  <canvas id="c"></canvas>
+
+  <script>
+    window.addEventListener('error', function (e) {
+      var el = document.getElementById('errbox');
+      if (el) el.textContent = 'ERR: ' + e.message + ' (' + e.filename + ':' + e.lineno + ')';
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      var el = document.getElementById('errbox');
+      if (el) el.textContent = 'ERR: ' + e.reason;
+    });
+  </script>
+
+  <script src="three.min.js"></script>
+  <script src="GLTFLoader.js"></script>
+  <script src="app.js?v=1.0.0"></script>
+</body>
+</html>

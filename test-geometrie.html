@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8"/>
+  <title>Test geometrie (bureau, sans casque)</title>
+  <style>
+    body { margin:0; background:#101418; color:#ddd; font-family:sans-serif; }
+    #log { position:fixed; top:0; left:0; padding:10px; font-size:12px;
+           white-space:pre; background:rgba(0,0,0,.7); max-height:100vh; overflow:auto; z-index:5; }
+    canvas { display:block; }
+  </style>
+</head>
+<body>
+<div id="log">Chargement...</div>
+<script src="three.min.js"></script>
+<script src="GLTFLoader.js"></script>
+<script>
+var L = [];
+function log(s){ L.push(s); document.getElementById('log').textContent = L.join('\n'); }
+
+// Ouverte en double-clic (file://), la page ne peut pas lire le .json ni le
+// .glb : le navigateur bloque. Il faut passer par le serveur local.
+if (location.protocol === 'file:') {
+  log('*** CETTE PAGE DOIT ETRE OUVERTE VIA LE SERVEUR LOCAL ***');
+  log('');
+  log('Tu as ouvert le fichier en double-clic (adresse "file://").');
+  log('Dans ce mode, le navigateur interdit a la page de lire');
+  log('exercices.json et pince.glb : rien ne peut s afficher.');
+  log('');
+  log('Ferme cet onglet, puis double-clique sur  test-sur-pc.bat');
+  log('(il demarre le serveur et rouvre cette page correctement).');
+  throw new Error('file:// non supporte');
+}
+
+var renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+var scene = new THREE.Scene();
+scene.add(new THREE.AmbientLight(0xffffff,1.6));
+var dl=new THREE.DirectionalLight(0xffffff,1); dl.position.set(1,2,1); scene.add(dl);
+var camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.01, 20);
+
+function trouverNoeud(racine, id){
+  var trouve=null;
+  var motif1='NAUO'+id.replace(/^NAUO/,'')+'>';
+  var motif2='NAUO'+id.replace(/^NAUO/,'')+'_';
+  racine.traverse(function(n){
+    if(trouve||!n.name) return;
+    if(n.name.indexOf(motif1)>=0||n.name.indexOf(motif2)>=0) trouve=n;
+  });
+  return trouve;
+}
+function ajusterTaille(o,c){
+  var b=new THREE.Box3().setFromObject(o), t=new THREE.Vector3(); b.getSize(t);
+  var m=Math.max(t.x,t.y,t.z); if(m>0) o.scale.setScalar(c/m);
+}
+
+fetch('exercices.json').then(r=>r.json()).then(function(data){
+  var ex = data.exercices[0];
+  log('exercices.json OK -> ' + ex.titre);
+
+  new THREE.GLTFLoader().load(ex.modele, function(gltf){
+    var racine=gltf.scene;
+    ajusterTaille(racine, 0.60);
+    scene.add(racine);
+    racine.updateMatrixWorld(true);
+
+    var noms=[]; racine.traverse(n=>{ if(n.name) noms.push(n.name); });
+    log('noeuds charges : '+noms.length);
+    log('exemple de nom : "'+noms[3]+'"');
+
+    // --- piece isolee ---
+    var piece=trouverNoeud(racine, ex.piece);
+    log('piece isolee ('+ex.piece+') : '+(piece?('TROUVEE -> '+piece.name):'*** INTROUVABLE ***'));
+    var dans=[]; if(piece) piece.traverse(n=>{if(n.isMesh)dans.push(n);});
+    log('  meshes dans la piece : '+dans.length);
+    var matP=new THREE.MeshStandardMaterial({color:0xff8c1a});
+    var matA=new THREE.MeshStandardMaterial({color:0x8a93a6,transparent:true,opacity:0.38});
+    racine.traverse(n=>{ if(n.isMesh) n.material = dans.indexOf(n)>=0?matP:matA; });
+
+    // --- points candidats ---
+    var pts=[];
+    ex.pointsCandidats.forEach(function(pt){
+      var n=trouverNoeud(racine, pt.id);
+      if(!n){ log('POINT INTROUVABLE : '+pt.id); return; }
+      var p=new THREE.Vector3(); n.getWorldPosition(p);
+      pts.push({id:pt.id,nom:pt.nom,p:p});
+      var m=new THREE.Mesh(new THREE.SphereGeometry(0.010,12,12),
+              new THREE.MeshBasicMaterial({color:0x35c9ff}));
+      m.position.copy(p); scene.add(m);
+    });
+    log('points candidats places : '+pts.length+' / '+ex.pointsCandidats.length);
+
+    // --- separation minimale entre points (pour l'accrochage) ---
+    var dmin=1e9, pa='', pb='';
+    for(var i=0;i<pts.length;i++) for(var j=i+1;j<pts.length;j++){
+      var d=pts[i].p.distanceTo(pts[j].p);
+      if(d<dmin){dmin=d;pa=pts[i].id;pb=pts[j].id;}
+    }
+    log('separation MIN entre 2 points : '+(dmin*100).toFixed(1)+' cm  ('+pa+' / '+pb+')');
+    var RSNAP=0.014;
+    log('  -> rayon d accrochage : '+(RSNAP*100).toFixed(1)+' cm  '+(dmin/2>RSNAP?'OK':'*** TROP GRAND ***'));
+
+    // --- repere du plan ---
+    var P=new THREE.Vector3(),Lm=new THREE.Vector3(),G=new THREE.Vector3();
+    trouverNoeud(racine,ex.reperePivot).getWorldPosition(P);
+    trouverNoeud(racine,ex.repereLame).getWorldPosition(Lm);
+    trouverNoeud(racine,ex.repereGalet).getWorldPosition(G);
+    // La normale du plan est l'AXE DU PIVOT, c'est-a-dire l'axe Z propre de
+    // la piece isolee. Passer par 3 points serait faux : l'axe de machoire
+    // est decale de 7 mm hors du plan du mecanisme.
+    var n=new THREE.Vector3(0,0,1).applyQuaternion(piece.getWorldQuaternion(new THREE.Quaternion())).normalize();
+    // Projection : on ne garde que la composante dans le plan.
+    function proj(v){ return v.clone().sub(n.clone().multiplyScalar(v.dot(n))); }
+    var u=proj(Lm.clone().sub(P)).normalize();
+    var w=n.clone().cross(u).normalize();
+
+    // Le bras de levier d'une force portee par w n'est pas la distance au
+    // pivot, mais sa COMPOSANTE selon u (perpendiculaire a la force).
+    var brasLame  = Math.abs(proj(Lm.clone().sub(P)).dot(u));
+    var brasGalet = Math.abs(proj(G.clone().sub(P)).dot(u));
+    log('distance pivot->galet : '+(proj(G.clone().sub(P)).length()*100).toFixed(2)+' cm');
+    log('BRAS DE LEVIER lame   : '+(brasLame*100).toFixed(2)+' cm');
+    log('BRAS DE LEVIER galet  : '+(brasGalet*100).toFixed(2)+' cm');
+    log('RAPPORT DE LEVIER : '+(brasGalet/brasLame).toFixed(3)+'   (valeur du JSON : '
+        +ex.forces[1].norme+')');
+    log('normale du plan n : ('+n.x.toFixed(2)+', '+n.y.toFixed(2)+', '+n.z.toFixed(2)+')');
+    log('  -> plan HORIZONTAL ? '+(Math.abs(n.y)>0.95?'oui':'non'));
+
+    // Le galet doit etre du cote +w (convention du JSON).
+    log('galet du cote +w ? '+(proj(G.clone().sub(P)).dot(w)>0?'oui':'*** NON, signes a inverser ***'));
+
+    // --- fleches solution ---
+    ex.forces.forEach(function(F){
+      var pt=pts.filter(q=>q.id===F.point)[0];
+      if(!pt){ log('FORCE sans point : '+F.point); return; }
+      var d=u.clone().multiplyScalar(F.dir[0]).add(w.clone().multiplyScalar(F.dir[1])).normalize();
+      var ah=new THREE.ArrowHelper(d, pt.p, F.norme*0.046, 0x3ddc84, 0.02, 0.012);
+      scene.add(ah);
+    });
+    log('fleches solution tracees : '+ex.forces.length);
+
+    // --- verification de l equilibre de la solution ---
+    var Fx=new THREE.Vector3(), Mz=0;
+    ex.forces.forEach(function(F){
+      var pt=pts.filter(q=>q.id===F.point)[0]; if(!pt) return;
+      var d=u.clone().multiplyScalar(F.dir[0]).add(w.clone().multiplyScalar(F.dir[1])).normalize();
+      var vecF=d.multiplyScalar(F.norme);
+      Fx.add(vecF);
+      Mz += proj(pt.p.clone().sub(P)).cross(vecF).dot(n);
+    });
+    log('--- verification de la solution ---');
+    log('somme des forces  : '+Fx.length().toFixed(3)+'   (doit etre ~0)');
+    log('somme des moments : '+Mz.toFixed(4)+'   (doit etre ~0)');
+
+    // vue de dessus centree
+    var box=new THREE.Box3().setFromObject(racine), ctr=new THREE.Vector3();
+    box.getCenter(ctr);
+    camera.position.set(ctr.x, ctr.y+0.95, ctr.z+0.02);
+    camera.lookAt(ctr);
+    renderer.render(scene,camera);
+  }, undefined, function(e){ log('ERREUR GLB : '+e); });
+}).catch(e=>log('ERREUR JSON : '+e));
+</script>
+</body>
+</html>

@@ -1,0 +1,953 @@
+// =====================================================================
+//  Editeur de liaisons - v2.0.0
+//  Deux etapes en realite mixte :
+//   1. Coloriage : regrouper par couleur les pieces qui forment un meme
+//      solide (classes d'equivalence cinematique). Corrige par
+//      equivalence (peu importe la couleur exacte, seul le regroupement
+//      compte) a partir de classes.json.
+//   2. Liaisons : viser le centre de chaque liaison pivot et le poser
+//      d'une pression de gachette. Enregistre dans points-liaisons.json
+//      (via le serveur local) pour etre relu ensuite.
+// =====================================================================
+
+window.addEventListener('load', function () {
+
+var status  = document.getElementById('status');
+var overlay = document.getElementById('overlay');
+var canvas  = document.getElementById('c');
+var errbox  = document.getElementById('errbox');
+function erreur(txt) { errbox.textContent = txt; }
+
+// V1 : cric-v1.glb, sans excentrique ni plateforme (charge directe sur la
+// chape, etude dans le plan median). cric.glb (complet) servira pour la V2.
+var MODELE        = 'cric-v1.glb';
+var TAILLE_MODELE = 0.55;   // plus grande dimension du cric affiche, en metres
+
+if (typeof THREE === 'undefined') { status.textContent = 'Erreur : Three.js non charge'; return; }
+
+if (!navigator.xr) {
+  status.textContent = 'WebXR non disponible sur ce navigateur';
+} else {
+  navigator.xr.isSessionSupported('immersive-ar').then(function (ok) {
+    status.textContent = ok ? 'Pret !' : 'Realite mixte non supportee';
+    if (!ok) document.getElementById('btnCommencer').disabled = true;
+  });
+}
+
+// --- Rendu ------------------------------------------------------------
+var gl = canvas.getContext('webgl2', { xrCompatible: true }) ||
+         canvas.getContext('webgl',  { xrCompatible: true });
+var renderer = new THREE.WebGLRenderer({ canvas: canvas, context: gl, alpha: true, antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local');
+
+var scene  = new THREE.Scene();
+var camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+var dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+dirLight.position.set(1, 2, 1);
+scene.add(dirLight);
+
+// --- Etat global --------------------------------------------------------
+var anchor       = new THREE.Group();
+var anchorPlaced = false;
+var modeleCharge = false;
+var racine       = null;   // gltf.scene : les positions enregistrees sont
+                            // exprimees dans SON repere local (= repere du
+                            // fichier .glb d'origine, independant de l'echelle
+                            // et de la position sur la table).
+var meshesModele = [];     // pour le raycast de placement/visee (toutes les pieces)
+
+anchor.visible = false;
+scene.add(anchor);
+
+// --- Etapes : 'coloriage' (si classes.json est charge) puis 'liaisons' -
+var etape = 'coloriage';
+
+// --- Etape coloriage ----------------------------------------------------
+var classesDef    = null;    // contenu de classes.json (ou null si absent/en erreur)
+var piecesModele   = [];     // { nomBase, meshes:[...], couleur: hex|null }
+var couleurActive  = null;   // hex de la couleur actuellement selectionnee dans la palette
+
+// 12 couleurs (aucun gris : le gris est deja pris par l'etat "pas colorie").
+var PALETTE = [
+  { hex: 0xe6194b, nom: 'rouge' },
+  { hex: 0xf58231, nom: 'orange' },
+  { hex: 0xffe119, nom: 'jaune' },
+  { hex: 0x3cb44b, nom: 'vert' },
+  { hex: 0x42d4f4, nom: 'cyan' },
+  { hex: 0x4363d8, nom: 'bleu' },
+  { hex: 0x911eb4, nom: 'violet' },
+  { hex: 0xf032e6, nom: 'magenta' },
+  { hex: 0xff6bc0, nom: 'rose' },
+  { hex: 0x9a6324, nom: 'marron' },
+  { hex: 0xfa8072, nom: 'corail' },
+  { hex: 0x469990, nom: 'turquoise' }
+];
+
+fetch('classes.json?v=' + Date.now())
+  .then(function (r) { if (!r.ok) throw new Error('absent'); return r.json(); })
+  .then(function (d) { classesDef = d; })
+  .catch(function () { classesDef = null; });   // pas de coloriage : on passe direct aux liaisons
+
+// Nom de base d'un noeud glTF : enleve le suffixe "_<...>" ajoute a l'export.
+function baseName(nom) { return nom ? nom.split('_<')[0].split(' <')[0] : nom; }
+
+// Normalise un mot pour le comparer aux id de classes.json : minuscules,
+// espaces -> underscores, accents retires (ex: "bras superieur" -> "bras_superieur").
+var ACCENTS = { 'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'à': 'a', 'â': 'a', 'î': 'i', 'ï': 'i', 'ô': 'o', 'û': 'u', 'ù': 'u', 'ç': 'c' };
+function normaliserToken(s) {
+  return s.trim().toLowerCase().replace(/[éèêëàâîïôûùç]/g, function (c) { return ACCENTS[c]; }).replace(/\s+/g, '_');
+}
+
+// --- Liste des points a placer, initialisee depuis le champ texte -----
+// Format attendu : "LETTRE : cote1 / cote2" (ex: "C : chape / bras superieur").
+// cotes[] sert a rattacher chaque point aux classes de classes.json, pour
+// tracer ensuite la structure filaire de chaque solide colorie.
+var points = [];   // { nom, lettre, cotes:[id,id], pos: THREE.Vector3|null, meshProche: string|null }
+var courant = 0;
+
+(function initListe() {
+  var texte = document.getElementById('listePoints').value;
+  texte.split('\n').map(function (l) { return l.trim(); }).filter(Boolean)
+    .forEach(function (nom) {
+      var lettre = nom.split(':')[0].trim();
+      var reste = nom.indexOf(':') >= 0 ? nom.slice(nom.indexOf(':') + 1) : nom;
+      var cotes = reste.split('/').map(normaliserToken).filter(Boolean);
+      points.push({ nom: nom, lettre: lettre, cotes: cotes, pos: null, meshProche: null });
+    });
+})();
+
+// =====================================================================
+//  PANNEAU (texture canvas), meme principe que app.js
+// =====================================================================
+var PW = 1024, PH = 700;
+var pc = document.createElement('canvas'); pc.width = PW; pc.height = PH;
+var px = pc.getContext('2d');
+var ptex = new THREE.CanvasTexture(pc);
+var panneau = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.60, 0.41),
+  new THREE.MeshBasicMaterial({ map: ptex, transparent: true })
+);
+panneau.visible = false;
+scene.add(panneau);
+
+var boutons = [];
+
+function coinsArrondis(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y,     x + w, y + h, r);
+  c.arcTo(x + w, y + h, x,     y + h, r);
+  c.arcTo(x,     y + h, x,     y,     r);
+  c.arcTo(x,     y,     x + w, y,     r);
+  c.closePath();
+}
+
+function couper(c, texte, maxW) {
+  var sortie = [];
+  texte.split('\n').forEach(function (paragraphe) {
+    if (paragraphe === '') { sortie.push(''); return; }
+    var mots = paragraphe.split(' ');
+    var ligne = '';
+    mots.forEach(function (mot) {
+      var essai = ligne ? ligne + ' ' + mot : mot;
+      if (c.measureText(essai).width > maxW && ligne) { sortie.push(ligne); ligne = mot; }
+      else ligne = essai;
+    });
+    if (ligne) sortie.push(ligne);
+  });
+  return sortie;
+}
+
+function dessinerPanneau(titre, corps, listeBoutons) {
+  boutons = listeBoutons || [];
+
+  px.clearRect(0, 0, PW, PH);
+  px.fillStyle = 'rgba(12,14,20,0.94)';
+  coinsArrondis(px, 0, 0, PW, PH, 28); px.fill();
+  px.strokeStyle = '#35c9ff'; px.lineWidth = 4;
+  coinsArrondis(px, 2, 2, PW - 4, PH - 4, 28); px.stroke();
+
+  px.fillStyle = '#35c9ff';
+  px.font = 'bold 38px sans-serif';
+  px.textAlign = 'left'; px.textBaseline = 'top';
+  px.fillText(titre, 44, 30);
+
+  px.font = '28px sans-serif';
+  var y = 90;
+  corps.forEach(function (item) {
+    var txt     = (typeof item === 'string') ? item : item.texte;
+    var couleur = (typeof item === 'string') ? '#e8e8e8' : item.couleur;
+    px.fillStyle = couleur;
+    couper(px, txt, PW - 88).forEach(function (l) {
+      if (y < 450) { px.fillText(l, 44, y); y += 34; }
+    });
+  });
+
+  px.textAlign = 'center'; px.textBaseline = 'middle';
+  boutons.forEach(function (b) {
+    px.fillStyle = b.couleur;
+    coinsArrondis(px, b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1, 16); px.fill();
+    px.fillStyle = '#fff';
+    px.font = 'bold 24px sans-serif';
+    px.fillText(b.texte, (b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2);
+  });
+  px.textAlign = 'left'; px.textBaseline = 'top';
+
+  ptex.needsUpdate = true;
+}
+
+// Grille de boutons : ligne 0 ou 1, colonne 0 a 2.
+function emplacement(ligne, col) {
+  var larg = 290, marge = 44, ecart = 37;
+  var y1 = 480 + ligne * 100, y2 = y1 + 70;
+  return { x1: marge + col * (larg + ecart), y1: y1, x2: marge + col * (larg + ecart) + larg, y2: y2 };
+}
+function bouton(ligne, col, texte, couleur, action) {
+  var e = emplacement(ligne, col);
+  return { x1: e.x1, y1: e.y1, x2: e.x2, y2: e.y2, texte: texte, couleur: couleur, action: action };
+}
+
+// =====================================================================
+//  CHARGEMENT DU MODELE
+// =====================================================================
+var loader = new THREE.GLTFLoader();
+
+function ajusterTaille(objet, cible) {
+  var box = new THREE.Box3().setFromObject(objet);
+  var t = new THREE.Vector3(); box.getSize(t);
+  var m = Math.max(t.x, t.y, t.z);
+  if (m > 0) objet.scale.setScalar(cible / m);
+  return m > 0 ? cible / m : 1;
+}
+
+var COULEUR_NEUTRE = 0x9aa4b5;   // gris : piece pas encore coloriee
+
+// Regroupe les meshes par sous-ensemble de premier niveau (chaque piece
+// physique du cric), avec un materiau CLONE par piece pour pouvoir la
+// peindre independamment des autres.
+function construirePieces() {
+  piecesModele = [];
+  var racineSousEns = racine.children[0] && racine.children[0].children.length
+    ? racine.children[0].children : racine.children;
+
+  racineSousEns.forEach(function (noeud) {
+    var meshes = [];
+    noeud.traverse(function (n) {
+      if (!n.isMesh) return;
+      n.material = new THREE.MeshStandardMaterial({ color: COULEUR_NEUTRE, metalness: 0.15, roughness: 0.7 });
+      meshes.push(n);
+    });
+    if (!meshes.length) return;
+    var idx = piecesModele.length;
+    meshes.forEach(function (m) { m.userData.piece = idx; });
+    piecesModele.push({ nomBase: baseName(noeud.name), noeud: noeud, meshes: meshes, couleur: null });
+  });
+}
+
+// Le modele est charge des l'entree en realite mixte (pas au 1er appui
+// gachette) : il est ainsi visible et suit le reticule de visee AVANT
+// d'etre pose, pour que l'utilisateur puisse voir le systeme avant de
+// choisir ou le placer.
+var enAttentePassage = false;   // gachette deja appuyee, mais modele pas encore charge
+
+function demarrerEtape() {
+  if (classesDef && classesDef.classes && classesDef.classes.length) passerEnColoriage();
+  else passerEnPlacement();
+}
+
+function chargerModele() {
+  loader.load(MODELE, function (gltf) {
+    racine = gltf.scene;
+    ajusterTaille(racine, TAILLE_MODELE);
+    anchor.add(racine);
+    racine.position.set(0, 0.01, 0);
+    racine.updateMatrixWorld(true);
+
+    construirePieces();
+    meshesModele = [];
+    piecesModele.forEach(function (p) { meshesModele = meshesModele.concat(p.meshes); });
+    calculerPlanMedian();
+
+    modeleCharge = true;
+    anchor.visible = true;   // apercu visible tout de suite, meme avant la pose
+    if (enAttentePassage) demarrerEtape();
+  }, undefined, function (e) { erreur('Erreur GLB : ' + e); });
+}
+
+// =====================================================================
+//  PLAN MEDIAN (etude plane) + STRUCTURE FILAIRE
+//
+//  Le cric est symetrique par rapport a un plan : on le retrouve a partir
+//  d'une paire de pieces jumelles connues (Bras_inferieur, present 2 fois
+//  de part et d'autre), leur milieu donne un point du plan de symetrie.
+//  La normale du plan est l'axe Z local du modele (etabli par mesure :
+//  toutes les pieces jumelles ne different que par leur coordonnee Z).
+// =====================================================================
+var medianZ_local = null;   // coordonnee Z (repere local de racine) du plan de symetrie
+var _qTmp = new THREE.Quaternion();
+
+function calculerPlanMedian() {
+  var paire = piecesModele.filter(function (p) { return p.nomBase === 'Bras_inférieur'; });
+  if (paire.length !== 2) { erreur('Plan median : paire "Bras_inferieur" introuvable (symetrie non calculee).'); return; }
+  var a = new THREE.Vector3(), b = new THREE.Vector3();
+  paire[0].noeud.getWorldPosition(a);
+  paire[1].noeud.getWorldPosition(b);
+  racine.worldToLocal(a); racine.worldToLocal(b);
+  medianZ_local = (a.z + b.z) / 2;
+}
+
+// Plan median courant, en coordonnees MONDE : {O: point du plan, n: normale}.
+function planMedian() {
+  var n = new THREE.Vector3(0, 0, 1).applyQuaternion(racine.getWorldQuaternion(_qTmp)).normalize();
+  var O = racine.localToWorld(new THREE.Vector3(0, 0, medianZ_local));
+  return { O: O, n: n };
+}
+
+// Projette un point MONDE sur le plan median.
+function projeterSurPlan(p, plan) {
+  var d = p.clone().sub(plan.O).dot(plan.n);
+  return p.clone().sub(plan.n.clone().multiplyScalar(d));
+}
+
+// --- Affichage : projections des points + structure filaire par solide -
+var groupeProjections = new THREE.Group(); scene.add(groupeProjections);
+var groupeFilaire     = new THREE.Group(); scene.add(groupeFilaire);
+
+function viderGroupe(g) {
+  while (g.children.length) {
+    var c = g.children.pop();
+    if (c.geometry) c.geometry.dispose();
+    if (c.material) c.material.dispose();
+  }
+}
+
+// Reconstruit entierement les projections et la structure filaire a partir
+// des points actuellement places. Appelee a chaque point pose et a chaque
+// changement de couleur (le filaire reprend la couleur de chaque solide).
+function majProjectionEtFilaire() {
+  viderGroupe(groupeProjections);
+  viderGroupe(groupeFilaire);
+  if (medianZ_local === null || !racine) return;
+
+  var plan = planMedian();
+  var projMonde = {};   // lettre -> Vector3 (position projetee, MONDE)
+
+  points.forEach(function (pt) {
+    if (!pt.pos) return;
+    var wp = pt.pos.clone(); racine.localToWorld(wp);
+    var proj = projeterSurPlan(wp, plan);
+    projMonde[pt.lettre] = proj;
+
+    // Marqueur plat, pose dans le plan median.
+    var disque = new THREE.Mesh(
+      new THREE.CircleGeometry(0.009, 20),
+      new THREE.MeshBasicMaterial({ color: 0xdfe8ff, transparent: true, opacity: 0.85, depthTest: false, side: THREE.DoubleSide })
+    );
+    disque.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), plan.n);
+    disque.position.copy(proj);
+    disque.renderOrder = 870;
+    groupeProjections.add(disque);
+
+    // Trait fin reliant le point pose a sa projection (visualise l'operation).
+    var trait = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([wp, proj]),
+      new THREE.LineBasicMaterial({ color: 0x9fd0ff, transparent: true, opacity: 0.5, depthTest: false })
+    );
+    trait.renderOrder = 860;
+    groupeProjections.add(trait);
+  });
+
+  // Pour chaque solide deja colorie de façon homogene, relier (par des
+  // segments deux a deux) tous ses points projetes : une pièce a 2 points
+  // devient une barre, une pièce a 3 points un triangle, etc.
+  if (classesDef && classesDef.classes) {
+    classesDef.classes.forEach(function (c) {
+      var couleur = couleurDeClasse(c.id);
+      if (couleur === null) return;
+
+      var lettres = points.filter(function (pt) {
+        return pt.pos && pt.cotes.indexOf(c.id) >= 0;
+      }).map(function (pt) { return pt.lettre; });
+
+      for (var i = 0; i < lettres.length; i++) {
+        for (var j = i + 1; j < lettres.length; j++) {
+          var seg = new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints([projMonde[lettres[i]], projMonde[lettres[j]]]),
+            new THREE.LineBasicMaterial({ color: couleur, depthTest: false })
+          );
+          seg.renderOrder = 880;
+          groupeFilaire.add(seg);
+        }
+      }
+    });
+  }
+}
+
+// =====================================================================
+//  ETAPE 1 : COLORIAGE (classes d'equivalence cinematique)
+//
+//  Correction PAR EQUIVALENCE : la couleur exacte choisie n'a pas
+//  d'importance, seul le regroupement compte (memes pieces = meme
+//  couleur, pieces d'un autre solide = couleur differente).
+// =====================================================================
+
+// --- Petit panneau-palette, a part du panneau principal -----------------
+// 2 rangees de 6 couleurs.
+var PPW = 1024, PPH = 420;
+var ppc = document.createElement('canvas'); ppc.width = PPW; ppc.height = PPH;
+var ppx = ppc.getContext('2d');
+var pptex = new THREE.CanvasTexture(ppc);
+var panneauPalette = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.60, 0.60 * PPH / PPW),
+  new THREE.MeshBasicMaterial({ map: pptex, transparent: true })
+);
+panneauPalette.visible = false;
+scene.add(panneauPalette);
+
+var boutonsPalette = [];
+var PALETTE_COLS = 6;
+
+function dessinerPalette() {
+  boutonsPalette = [];
+  ppx.clearRect(0, 0, PPW, PPH);
+  ppx.fillStyle = 'rgba(12,14,20,0.94)';
+  coinsArrondis(ppx, 0, 0, PPW, PPH, 24); ppx.fill();
+  ppx.strokeStyle = '#35c9ff'; ppx.lineWidth = 3;
+  coinsArrondis(ppx, 2, 2, PPW - 4, PPH - 4, 24); ppx.stroke();
+
+  ppx.fillStyle = '#cfd8e6';
+  ppx.font = '24px sans-serif';
+  ppx.textAlign = 'left'; ppx.textBaseline = 'top';
+  ppx.fillText('Couleur active :', 36, 24);
+
+  var cols = PALETTE_COLS, marge = 36, taille = 140,
+      ecart = (PPW - 2 * marge - cols * taille) / (cols - 1);
+  PALETTE.forEach(function (c, i) {
+    var col = i % cols, ligne = Math.floor(i / cols);
+    var x = marge + col * (taille + ecart), y = 64 + ligne * (taille + 30);
+    ppx.fillStyle = '#' + c.hex.toString(16).padStart(6, '0');
+    coinsArrondis(ppx, x, y, taille, taille, 14); ppx.fill();
+    if (couleurActive === c.hex) {
+      ppx.strokeStyle = '#ffffff'; ppx.lineWidth = 6;
+      coinsArrondis(ppx, x - 4, y - 4, taille + 8, taille + 8, 16); ppx.stroke();
+    }
+    boutonsPalette.push({ x1: x, y1: y, x2: x + taille, y2: y + taille, action: (function (hex) {
+      return function () { selectionnerCouleur(hex); };
+    })(c.hex) });
+  });
+
+  pptex.needsUpdate = true;
+}
+
+function selectionnerCouleur(hex) {
+  couleurActive = hex;
+  dessinerPalette();
+  majPanneauColoriage(null);
+}
+
+function peindrePiece(idx) {
+  if (couleurActive === null) { majPanneauColoriage('Choisis d\'abord une couleur dans la palette, en bas.'); return; }
+  var piece = piecesModele[idx];
+  piece.couleur = couleurActive;
+  piece.meshes.forEach(function (m) { m.material.color.setHex(couleurActive); });
+  majPanneauColoriage(null);
+  majProjectionEtFilaire();
+}
+
+function nbPiecesColoriees() { return piecesModele.filter(function (p) { return p.couleur !== null; }).length; }
+
+function effacerColoriageTout() {
+  piecesModele.forEach(function (p) { p.couleur = null; p.meshes.forEach(function (m) { m.material.color.setHex(COULEUR_NEUTRE); }); });
+  majPanneauColoriage(null);
+  majProjectionEtFilaire();
+}
+
+// Compare le regroupement de l'etudiant a classes.json, par equivalence :
+// peu importe la couleur exacte, seul le regroupement compte.
+// nomBase de piece -> id de classe (classes.json). Partagee par la
+// correction du coloriage et le trace de la structure filaire.
+function mappeClasseAttendue() {
+  var m = {};
+  classesDef.classes.forEach(function (c) { c.pieces.forEach(function (nb) { m[nb] = c.id; }); });
+  return m;
+}
+
+// Couleur (hex) d'une classe si toutes ses pieces sont coloriees a
+// l'identique, sinon null (coloriage incomplet ou heterogene).
+function couleurDeClasse(id) {
+  var classeAttendue = mappeClasseAttendue();
+  var membres = piecesModele.filter(function (p) { return classeAttendue[p.nomBase] === id; });
+  if (!membres.length) return null;
+  var c0 = membres[0].couleur;
+  if (c0 === null) return null;
+  return membres.every(function (m) { return m.couleur === c0; }) ? c0 : null;
+}
+
+function evaluerColoriage() {
+  var classeAttendue = mappeClasseAttendue();
+
+  var parClasse = {};   // id classe -> liste des couleurs (ou null) de ses pieces
+  piecesModele.forEach(function (p) {
+    var cid = classeAttendue[p.nomBase];
+    if (!cid) return;   // piece non repertoriee dans classes.json : ignoree
+    (parClasse[cid] = parClasse[cid] || []).push(p.couleur);
+  });
+
+  var idsClasses = Object.keys(parClasse);
+  var monochrome = {};   // id -> couleur commune, ou null si incomplet/heterogene
+  idsClasses.forEach(function (id) {
+    var couleurs = parClasse[id];
+    var toutesColoriees = couleurs.every(function (c) { return c !== null; });
+    var identiques = toutesColoriees && couleurs.every(function (c) { return c === couleurs[0]; });
+    monochrome[id] = identiques ? couleurs[0] : null;
+  });
+
+  var parCouleur = {};   // couleur -> classes qui l'utilisent (en monochrome)
+  idsClasses.forEach(function (id) {
+    if (monochrome[id] === null) return;
+    (parCouleur[monochrome[id]] = parCouleur[monochrome[id]] || []).push(id);
+  });
+
+  function nomClasse(id) { return classesDef.classes.filter(function (c) { return c.id === id; })[0].nom; }
+
+  var classesOK = [], problemes = [];
+  idsClasses.forEach(function (id) {
+    if (monochrome[id] === null) {
+      var incomplet = parClasse[id].some(function (c) { return c === null; });
+      problemes.push(nomClasse(id) + (incomplet
+        ? ' : il manque encore des pieces a colorier.'
+        : ' : plusieurs couleurs differentes dans ce solide, elles devraient etre identiques.'));
+    } else if (parCouleur[monochrome[id]].length > 1) {
+      var autres = parCouleur[monochrome[id]].filter(function (x) { return x !== id; }).map(nomClasse);
+      problemes.push(nomClasse(id) + ' a la meme couleur que ' + autres.join(', ') + ', alors que ce sont des solides differents.');
+    } else {
+      classesOK.push(nomClasse(id));
+    }
+  });
+
+  return { total: idsClasses.length, ok: classesOK.length, problemes: problemes };
+}
+
+function validerColoriage() {
+  var r = evaluerColoriage();
+  var VERT = '#3ddc84', ORANGE = '#ffb020';
+  var corps = [
+    { texte: r.ok + ' / ' + r.total + ' solides correctement regroupes.', couleur: r.ok === r.total ? VERT : ORANGE }
+  ];
+  r.problemes.slice(0, 4).forEach(function (p) { corps.push({ texte: '• ' + p, couleur: '#ff9f4a' }); });
+
+  if (r.ok === r.total) {
+    corps.push('');
+    corps.push({ texte: 'Bravo, le regroupement est correct.', couleur: VERT });
+    dessinerPanneau('Coloriage — résultat', corps, [
+      bouton(0, 0, 'CONTINUER',   '#2f7d4f', passerEnPlacement),
+      bouton(0, 1, 'RECOLORIER',  '#3a5f8a', function () { majPanneauColoriage(null); })
+    ]);
+  } else {
+    dessinerPanneau('Coloriage — résultat', corps, [
+      bouton(0, 0, 'CORRIGER',            '#3a5f8a', function () { majPanneauColoriage(null); }),
+      bouton(0, 1, 'CONTINUER MALGRE TOUT','#7d4f2f', passerEnPlacement)
+    ]);
+  }
+}
+
+function majPanneauColoriage(message) {
+  var corps = [
+    classesDef.consigne, '',
+    { texte: 'Pieces coloriees : ' + nbPiecesColoriees() + ' / ' + piecesModele.length, couleur: '#9fd0ff' }
+  ];
+  if (message) corps.push({ texte: message, couleur: '#ff9f4a' });
+
+  dessinerPanneau('Étape 1 — Coloriage des solides', corps, [
+    bouton(0, 0, 'VALIDER',      '#2f7d4f', validerColoriage),
+    bouton(0, 1, 'TOUT EFFACER', '#7d4f2f', effacerColoriageTout)
+  ]);
+}
+
+function passerEnColoriage() {
+  etape = 'coloriage';
+  panneau.visible = true;
+  panneauPalette.visible = true;
+  dessinerPalette();
+  majPanneauColoriage(null);
+}
+
+// =====================================================================
+//  MARQUEURS DES POINTS DEJA PLACES
+// =====================================================================
+var marqueurs = [];   // parallele a "points" : { sphere, etiquette } ou null
+
+function creerEtiquette(texte, couleur) {
+  var c = document.createElement('canvas'); c.width = 512; c.height = 96;
+  var x = c.getContext('2d');
+  x.font = 'bold 40px sans-serif';
+  x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.lineWidth = 8; x.strokeStyle = 'rgba(0,0,0,0.85)';
+  x.strokeText(texte, 256, 48);
+  x.fillStyle = couleur;
+  x.fillText(texte, 256, 48);
+  var s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(c), transparent: true, depthTest: false
+  }));
+  s.scale.set(0.14, 0.026, 1);
+  s.renderOrder = 999;
+  return s;
+}
+
+function majMarqueur(i) {
+  var ancien = marqueurs[i];
+  if (ancien) { scene.remove(ancien.sphere); scene.remove(ancien.etiquette); marqueurs[i] = null; }
+  var pt = points[i];
+  if (!pt.pos || !racine) return;
+
+  var estCourant = (i === courant);
+  var couleur = estCourant ? 0xffd400 : 0x3ddc84;
+  var sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.010, 14, 14),
+    new THREE.MeshBasicMaterial({ color: couleur, depthTest: false, transparent: true, opacity: 0.92 })
+  );
+  sphere.renderOrder = 900;
+  var wp = pt.pos.clone();
+  racine.localToWorld(wp);
+  sphere.position.copy(wp);
+  scene.add(sphere);
+
+  var etq = creerEtiquette(pt.lettre || (i + 1) + '', estCourant ? '#ffe37a' : '#9dffc0');
+  etq.position.copy(wp).add(new THREE.Vector3(0, 0.022, 0));
+  scene.add(etq);
+
+  marqueurs[i] = { sphere: sphere, etiquette: etq };
+  majProjectionEtFilaire();
+}
+
+function rafraichirTousMarqueurs() {
+  for (var i = 0; i < points.length; i++) majMarqueur(i);
+}
+
+// =====================================================================
+//  NAVIGATION DANS LA LISTE
+// =====================================================================
+function nbPlaces() { return points.filter(function (p) { return p.pos; }).length; }
+
+function pointSuivantNonPlace(depart) {
+  for (var k = 1; k <= points.length; k++) {
+    var i = (depart + k) % points.length;
+    if (!points[i].pos) return i;
+  }
+  return (depart + 1) % points.length;
+}
+
+function allerA(i) {
+  var precedent = courant;
+  courant = ((i % points.length) + points.length) % points.length;
+  majMarqueur(precedent);
+  majMarqueur(courant);
+  majPanneau(null);
+}
+
+function precedent() { allerA(courant - 1); }
+function suivant()   { allerA(courant + 1); }
+
+function supprimerCourant() {
+  points[courant].pos = null;
+  points[courant].meshProche = null;
+  majMarqueur(courant);
+  majPanneau('Point efface. Vise et appuie pour le replacer.');
+}
+
+function ajouterPoint() {
+  var n = points.length + 1;
+  // cotes: [] -> ce point supplementaire n'est rattache a aucun solide
+  // connu, il n'apparaitra donc pas dans la structure filaire (normal :
+  // classes.json ne le connait pas).
+  points.push({ nom: '+' + n, lettre: '+' + n, cotes: [], pos: null, meshProche: null });
+  marqueurs.push(null);
+  allerA(points.length - 1);
+  majPanneau('Nouveau point ajoute. Vise sa position et appuie sur la gachette.');
+}
+
+// =====================================================================
+//  ENREGISTREMENT (POST vers le serveur local)
+// =====================================================================
+function enregistrer() {
+  var donnees = {
+    modele: MODELE,
+    date: new Date().toISOString(),
+    repere: 'Positions exprimees dans le repere local du fichier .glb ' +
+            '(identique aux translations des noeuds dans le fichier source).',
+    points: points.map(function (p) {
+      return {
+        nom: p.nom,
+        placee: !!p.pos,
+        position: p.pos ? { x: round4(p.pos.x), y: round4(p.pos.y), z: round4(p.pos.z) } : null,
+        meshProche: p.meshProche
+      };
+    })
+  };
+
+  majPanneau('Enregistrement...');
+  fetch('/enregistrer-points', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(donnees)
+  }).then(function (r) { return r.json(); }).then(function (r) {
+    if (r.ok) {
+      majPanneau(nbPlaces() + ' / ' + points.length + ' points enregistres dans\npoints-liaisons.json.');
+    } else {
+      majPanneau('Erreur d\'enregistrement : ' + r.erreur);
+    }
+  }).catch(function (e) {
+    majPanneau('Erreur reseau : ' + e.message + '\n(le serveur local repond-il ?)');
+  });
+}
+
+function round4(v) { return Math.round(v * 10000) / 10000; }
+
+// =====================================================================
+//  PANNEAU EN MODE PLACEMENT
+// =====================================================================
+function majPanneau(message) {
+  var pt = points[courant];
+  var corps = [
+    { texte: 'Point ' + (courant + 1) + ' / ' + points.length + ' :', couleur: '#9fd0ff' },
+    { texte: pt.nom, couleur: '#ffe37a' },
+    { texte: pt.pos ? 'Deja place. Rappuie pour le corriger.' : 'Vise le centre de cette liaison, gachette pour poser.', couleur: '#cfd8e6' },
+    '',
+    { texte: 'Points places : ' + nbPlaces() + ' / ' + points.length, couleur: '#9dffc0' }
+  ];
+  if (message) corps.push({ texte: message, couleur: '#ff9f4a' });
+
+  dessinerPanneau('Editeur de liaisons', corps, [
+    bouton(0, 0, '< PRECEDENT',   '#3a5f8a', precedent),
+    bouton(0, 1, 'SUIVANT >',     '#3a5f8a', suivant),
+    bouton(0, 2, 'AJOUTER POINT', '#4a4a4a', ajouterPoint),
+    bouton(1, 0, 'SUPPRIMER',     '#7d4f2f', supprimerCourant),
+    bouton(1, 1, 'ENREGISTRER',   '#2f7d4f', enregistrer)
+  ]);
+}
+
+function passerEnPlacement() {
+  etape = 'liaisons';
+  panneauPalette.visible = false;
+  panneau.visible = true;
+  rafraichirTousMarqueurs();
+  majPanneau(null);
+}
+
+// =====================================================================
+//  MANETTES : viser le modele, gachette pour poser
+// =====================================================================
+var controllers = [renderer.xr.getController(0), renderer.xr.getController(1)];
+var rayon = new THREE.Raycaster();
+var mat4 = new THREE.Matrix4();
+
+// Reticule : petit anneau qui suit le point vise sur le modele.
+var reticuleVisee = new THREE.Mesh(
+  new THREE.RingGeometry(0.006, 0.009, 20),
+  new THREE.MeshBasicMaterial({ color: 0x35c9ff, side: THREE.DoubleSide, depthTest: false })
+);
+reticuleVisee.renderOrder = 950;
+reticuleVisee.visible = false;
+scene.add(reticuleVisee);
+
+var derniereVisee = null;   // { point: Vector3(monde), nomMesh: string } ou null
+
+controllers.forEach(function (ctrl, idx) {
+  scene.add(ctrl);
+  ctrl.add(new THREE.Mesh(
+    new THREE.SphereGeometry(0.008, 10, 10),
+    new THREE.MeshBasicMaterial({ color: 0xffffff })
+  ));
+  var ligne = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]),
+    new THREE.LineBasicMaterial({ color: 0x35c9ff, transparent: true, opacity: 0.5 })
+  );
+  ligne.scale.z = 3;
+  ctrl.add(ligne);
+
+  ctrl.addEventListener('selectstart', function () {
+    // 1er appui : fige la position de l'apercu (deja visible et suivant le
+    // reticule depuis le chargement). Si le modele n'est pas encore charge
+    // (reseau lent), on attend juste qu'il le soit pour enchainer.
+    if (!anchorPlaced) {
+      anchorPlaced = true;
+      reticulePlacement.visible = false;
+      if (modeleCharge) demarrerEtape(); else enAttentePassage = true;
+      return;
+    }
+
+    if (panneau.visible && testerPanneau(ctrl)) return;
+    if (panneauPalette.visible && testerPalette(ctrl)) return;
+
+    if (etape === 'coloriage') {
+      if (derniereVisee && derniereVisee.pieceIdx !== null) {
+        peindrePiece(derniereVisee.pieceIdx);
+      } else {
+        majPanneauColoriage('Vise une piece du modele avec le rayon bleu.');
+      }
+      return;
+    }
+
+    // etape === 'liaisons' : poser le point courant a l'endroit vise.
+    if (derniereVisee) {
+      points[courant].pos = racine.worldToLocal(derniereVisee.point.clone());
+      points[courant].meshProche = derniereVisee.nomMesh;
+      majMarqueur(courant);
+      allerA(pointSuivantNonPlace(courant));
+    } else {
+      majPanneau('Vise une surface du modele avec le rayon bleu.');
+    }
+  });
+});
+
+// Raycast generique manette -> panneau canvas : declenche le bouton vise.
+// Retourne true si le panneau a ete touche (meme hors bouton), pour bloquer
+// toute action "derriere" le panneau.
+function raycastPanneau(ctrl, mesh, pw, ph, listeBoutons) {
+  mat4.identity().extractRotation(ctrl.matrixWorld);
+  rayon.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
+  rayon.ray.direction.set(0, 0, -1).applyMatrix4(mat4);
+
+  var hits = rayon.intersectObject(mesh, false);
+  if (!hits.length) return false;
+
+  var uv = hits[0].uv;
+  var cx = uv.x * pw;
+  var cy = (1 - uv.y) * ph;
+  for (var i = 0; i < listeBoutons.length; i++) {
+    var b = listeBoutons[i];
+    if (cx >= b.x1 && cx <= b.x2 && cy >= b.y1 && cy <= b.y2) { b.action(); return true; }
+  }
+  return true;
+}
+function testerPanneau(ctrl) { return raycastPanneau(ctrl, panneau, PW, PH, boutons); }
+function testerPalette(ctrl) { return raycastPanneau(ctrl, panneauPalette, PPW, PPH, boutonsPalette); }
+
+// Raycast continu (hors clic) pour montrer ou la manette pointe sur le modele.
+function majVisee(ctrl) {
+  if (!modeleCharge || !meshesModele.length) { derniereVisee = null; reticuleVisee.visible = false; return; }
+  mat4.identity().extractRotation(ctrl.matrixWorld);
+  rayon.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
+  rayon.ray.direction.set(0, 0, -1).applyMatrix4(mat4);
+
+  var hits = rayon.intersectObjects(meshesModele, false);
+  if (hits.length) {
+    derniereVisee = {
+      point: hits[0].point.clone(),
+      nomMesh: hits[0].object.name || null,
+      pieceIdx: (hits[0].object.userData.piece !== undefined) ? hits[0].object.userData.piece : null
+    };
+    reticuleVisee.visible = true;
+    reticuleVisee.position.copy(hits[0].point);
+    reticuleVisee.lookAt(rayon.ray.origin);
+  } else {
+    derniereVisee = null;
+    reticuleVisee.visible = false;
+  }
+}
+
+// =====================================================================
+//  PLACEMENT SUR LA TABLE (hit-test)
+// =====================================================================
+var reticulePlacement = new THREE.Mesh(
+  new THREE.RingGeometry(0.055, 0.075, 32).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0x35c9ff })
+);
+reticulePlacement.visible = false;
+scene.add(reticulePlacement);
+
+var hitTestSource = null, hitTestDemande = false;
+
+// =====================================================================
+//  BOUCLE DE RENDU
+// =====================================================================
+var camPos = new THREE.Vector3();
+
+renderer.setAnimationLoop(function (t, frame) {
+  if (frame && !anchorPlaced) {
+    var session = renderer.xr.getSession();
+    var refSpace = renderer.xr.getReferenceSpace();
+
+    if (!hitTestDemande) {
+      hitTestDemande = true;
+      session.requestReferenceSpace('viewer').then(function (vs) {
+        session.requestHitTestSource({ space: vs }).then(function (src) { hitTestSource = src; });
+      }).catch(function () {});
+    }
+
+    if (hitTestSource) {
+      var res = frame.getHitTestResults(hitTestSource);
+      if (res.length) {
+        var pose = res[0].getPose(refSpace);
+        reticulePlacement.visible = true;
+        reticulePlacement.matrix.fromArray(pose.transform.matrix);
+        reticulePlacement.matrix.decompose(reticulePlacement.position, reticulePlacement.quaternion, reticulePlacement.scale);
+        anchor.position.copy(reticulePlacement.position);
+      }
+    }
+  }
+
+  // Visee continue avec la premiere manette active (celle qui bouge).
+  if (anchorPlaced && modeleCharge) {
+    majVisee(controllers[0].visible === false ? controllers[1] : controllers[0]);
+  }
+
+  // Palette plus grande (2 rangees de 6) : les deux panneaux sont ecartes
+  // pour ne pas se chevaucher (panneau : 0,41 m de haut : panneauPalette : 0,25 m).
+  if (panneau.visible && anchorPlaced) {
+    panneau.position.copy(anchor.position).add(new THREE.Vector3(0, 0.60, 0));
+    camera.getWorldPosition(camPos);
+    panneau.lookAt(camPos.x, panneau.position.y, camPos.z);
+  }
+  if (panneauPalette.visible && anchorPlaced) {
+    panneauPalette.position.copy(anchor.position).add(new THREE.Vector3(0, 0.20, 0));
+    camera.getWorldPosition(camPos);
+    panneauPalette.lookAt(camPos.x, panneauPalette.position.y, camPos.z);
+  }
+
+  renderer.render(scene, camera);
+});
+
+// =====================================================================
+//  DEMARRAGE
+// =====================================================================
+// Certains navigateurs refusent la session entiere si un des features
+// optionnels de la liste leur deplait ("session configuration not
+// supported"), meme s'il est demande en optionalFeatures. On retente donc
+// avec une liste de plus en plus courte plutot que d'echouer d'un coup.
+var LISTES_FEATURES = [
+  ['hit-test', 'local-floor', 'local'],
+  ['hit-test', 'local-floor'],
+  ['hit-test'],
+  []
+];
+
+function demarrerSessionAR(i) {
+  if (i >= LISTES_FEATURES.length) {
+    status.textContent = 'Realite mixte non supportee par ce navigateur (toutes les configurations ont ete refusees).';
+    return;
+  }
+  navigator.xr.requestSession('immersive-ar', { optionalFeatures: LISTES_FEATURES[i] }).then(function (session) {
+    renderer.xr.setSession(session).then(function () {
+      overlay.style.display = 'none';
+      anchorPlaced = false;
+      hitTestDemande = false;
+      hitTestSource = null;
+      if (!modeleCharge) chargerModele();   // charge tout de suite : le modele est visible en apercu avant la pose
+
+      session.addEventListener('end', function () {
+        overlay.style.display = 'flex';
+        status.textContent = 'Session terminee.';
+      });
+    }).catch(function (e) { status.textContent = 'Erreur setSession : ' + e.message; });
+  }).catch(function () {
+    demarrerSessionAR(i + 1);   // configuration refusee : on retente en plus sobre
+  });
+}
+
+document.getElementById('btnCommencer').addEventListener('click', function () { demarrerSessionAR(0); });
+
+}); // fin window load

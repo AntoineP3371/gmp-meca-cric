@@ -1,0 +1,8 @@
+# Outil de tunnel : trop gros pour git, et inutile une fois sur GitHub Pages
+cloudflared.exe
+
+# Config locale (chemins Windows propres a cette machine)
+.claude/
+
+# Donnees de travail regenerees a chaque session d'edition des liaisons
+points-liaisons.json

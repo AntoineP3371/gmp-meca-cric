@@ -1,0 +1,59 @@
+{
+  "_lisezmoi": [
+    "Regroupement des pieces du cric en classes d'equivalence cinematique",
+    "(quelles pieces sont rigidement liees entre elles, donc bougent",
+    "ensemble). Sert a la correction de l'etape de coloriage dans",
+    "editeur.html : l'etudiant colore les pieces, l'app verifie que",
+    "toutes les pieces d'une meme classe ont recu la MEME couleur, et",
+    "que deux classes differentes ont des couleurs DIFFERENTES. La",
+    "couleur exacte choisie par l'etudiant n'a pas d'importance.",
+    "",
+    "*** VERSION 1 (etude dans le plan median) ***",
+    "Excentrique et plateforme sont retires du modele (cric-v1.glb, sans",
+    "ces deux pieces). La charge s'applique directement sur la chape :",
+    "c'est une hypothese donnee a l'etudiant, pas une realite mecanique.",
+    "Une version 2 reprendra le modele complet (cric.glb) plus tard.",
+    "",
+    "Chaque entree de 'pieces' est le nom de base d'un sous-ensemble du",
+    "fichier .glb (tel qu'affiche par explorer.html, underscores compris).",
+    "Un meme nom peut correspondre a plusieurs pieces physiques dans la",
+    "scene (ex: 'Roue' = les 4 roues) : toutes recoivent la classe indiquee."
+  ],
+
+  "modele": "cric-v1.glb",
+
+  "consigne": "Choisis une couleur, puis vise une piece et appuie sur la gachette pour la peindre. Regroupe par la meme couleur toutes les pieces qui appartiennent au meme solide, c'est-a-dire qui ne bougent jamais l'une par rapport a l'autre.",
+
+  "classes": [
+    {
+      "id": "bati",
+      "nom": "Bâti (fixe)",
+      "pieces": ["Châssis", "Roue", "Support_pivot_roue_arrière"]
+    },
+    {
+      "id": "verin",
+      "nom": "Vérin (tige mobile)",
+      "pieces": ["Nez_de_vérin"]
+    },
+    {
+      "id": "bras_inferieur",
+      "nom": "Bras inférieur",
+      "pieces": ["Bras_inférieur"]
+    },
+    {
+      "id": "levier",
+      "nom": "Levier",
+      "pieces": ["Levier_droite", "Levier_gauche"]
+    },
+    {
+      "id": "bras_superieur",
+      "nom": "Bras supérieur",
+      "pieces": ["bras_assemblé"]
+    },
+    {
+      "id": "chape",
+      "nom": "Chape (reçoit la charge, liée aux deux bras)",
+      "pieces": ["chape_2"]
+    }
+  ]
+}
