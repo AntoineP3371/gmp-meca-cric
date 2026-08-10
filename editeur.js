@@ -320,7 +320,6 @@ function chargerModele() {
 //  toutes les pieces jumelles ne different que par leur coordonnee Z).
 // =====================================================================
 var medianZ_local = null;   // coordonnee Z (repere local de racine) du plan de symetrie
-var _qTmp = new THREE.Quaternion();
 
 function calculerPlanMedian() {
   var paire = piecesModele.filter(function (p) { return p.nomBase === 'Bras_inférieur'; });
@@ -332,22 +331,28 @@ function calculerPlanMedian() {
   medianZ_local = (a.z + b.z) / 2;
 }
 
-// Plan median courant, en coordonnees MONDE : {O: point du plan, n: normale}.
-function planMedian() {
-  var n = new THREE.Vector3(0, 0, 1).applyQuaternion(racine.getWorldQuaternion(_qTmp)).normalize();
-  var O = racine.localToWorld(new THREE.Vector3(0, 0, medianZ_local));
-  return { O: O, n: n };
+// Projette un point du repere local de racine sur le plan median : dans ce
+// repere le plan est simplement "z = medianZ_local" (voir calculerPlanMedian),
+// pas besoin de maths de plan generales.
+function projeterLocal(pLocalRacine) {
+  return new THREE.Vector3(pLocalRacine.x, pLocalRacine.y, medianZ_local);
 }
 
-// Projette un point MONDE sur le plan median.
-function projeterSurPlan(p, plan) {
-  var d = p.clone().sub(plan.O).dot(plan.n);
-  return p.clone().sub(plan.n.clone().multiplyScalar(d));
+// Convertit un point du repere local de racine vers le repere local de
+// l'ancre : racine.matrix encode sa position/echelle DANS l'ancre, fixees
+// une fois pour toutes au chargement (jamais modifiees ensuite), donc cette
+// conversion reste valable meme si l'ancre est ensuite deplacee/tournee/
+// zoomee. Les marqueurs et le filaire sont enfants de l'ancre (et non de
+// racine, qui porte l'echelle "ajusterTaille" du modele) pour garder une
+// taille de trait/etiquette stable independamment de cette echelle interne.
+function versAncre(pLocalRacine) {
+  return pLocalRacine.clone().applyMatrix4(racine.matrix);
 }
 
-// --- Affichage : projections des points + structure filaire par solide -
-var groupeProjections = new THREE.Group(); scene.add(groupeProjections);
-var groupeFilaire     = new THREE.Group(); scene.add(groupeFilaire);
+// --- Affichage : structure filaire par solide, enfant de l'ancre pour
+// suivre le systeme quand on le deplace/tourne/zoome au grip. ------------
+var groupeFilaire = new THREE.Group();
+anchor.add(groupeFilaire);
 
 function viderGroupe(g) {
   while (g.children.length) {
@@ -357,9 +362,9 @@ function viderGroupe(g) {
   }
 }
 
-// Barre 3D entre deux points MONDE (un cylindre, pas une THREE.Line : le
-// "linewidth" d'une Line n'est pas respecte par la plupart des GPU, un
-// cylindre est le seul moyen fiable d'avoir un trait vraiment epais).
+// Barre 3D entre deux points (meme repere que le groupe qui la reçoit) :
+// un cylindre, pas une THREE.Line, dont le "linewidth" n'est pas respecte
+// par la plupart des GPU.
 var RAYON_FILAIRE = 0.0035;
 function creerBarre(p1, p2, couleur, rayon) {
   var longueur = p1.distanceTo(p2);
@@ -374,40 +379,18 @@ function creerBarre(p1, p2, couleur, rayon) {
   return barre;
 }
 
-// Reconstruit entierement les projections et la structure filaire a partir
-// des points actuellement places. Appelee a chaque point pose et a chaque
-// changement de couleur (le filaire reprend la couleur de chaque solide).
+// Reconstruit la structure filaire a partir des points actuellement places
+// (deja affiches sur leur projection par majMarqueur). Appelee a chaque
+// point pose et a chaque changement de couleur (le filaire reprend la
+// couleur de chaque solide).
 function majProjectionEtFilaire() {
-  viderGroupe(groupeProjections);
   viderGroupe(groupeFilaire);
   if (medianZ_local === null || !racine) return;
 
-  var plan = planMedian();
-  var projMonde = {};   // lettre -> Vector3 (position projetee, MONDE)
-
+  var projAncre = {};   // lettre -> Vector3 (position projetee, repere ANCRE)
   points.forEach(function (pt) {
     if (!pt.pos) return;
-    var wp = pt.pos.clone(); racine.localToWorld(wp);
-    var proj = projeterSurPlan(wp, plan);
-    projMonde[pt.lettre] = proj;
-
-    // Marqueur plat, pose dans le plan median.
-    var disque = new THREE.Mesh(
-      new THREE.CircleGeometry(0.009, 20),
-      new THREE.MeshBasicMaterial({ color: 0xdfe8ff, transparent: true, opacity: 0.85, depthTest: false, side: THREE.DoubleSide })
-    );
-    disque.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), plan.n);
-    disque.position.copy(proj);
-    disque.renderOrder = 870;
-    groupeProjections.add(disque);
-
-    // Trait fin reliant le point pose a sa projection (visualise l'operation).
-    var trait = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints([wp, proj]),
-      new THREE.LineBasicMaterial({ color: 0x9fd0ff, transparent: true, opacity: 0.5, depthTest: false })
-    );
-    trait.renderOrder = 860;
-    groupeProjections.add(trait);
+    projAncre[pt.lettre] = versAncre(projeterLocal(pt.pos));
   });
 
   // Pour chaque solide deja colorie de façon homogene, relier (par des
@@ -424,7 +407,7 @@ function majProjectionEtFilaire() {
 
       for (var i = 0; i < lettres.length; i++) {
         for (var j = i + 1; j < lettres.length; j++) {
-          var barre = creerBarre(projMonde[lettres[i]], projMonde[lettres[j]], couleur, RAYON_FILAIRE);
+          var barre = creerBarre(projAncre[lettres[i]], projAncre[lettres[j]], couleur, RAYON_FILAIRE);
           if (barre) groupeFilaire.add(barre);
         }
       }
@@ -661,11 +644,16 @@ function creerEtiquette(texte, couleur) {
   return s;
 }
 
+// Le marqueur d'un point est affiche directement SUR sa projection dans le
+// plan median (etude plane), pas a l'endroit brut vise sur le modele 3D.
+// Enfant de l'ancre : suit le systeme quand on le deplace/tourne/zoome.
 function majMarqueur(i) {
   var ancien = marqueurs[i];
-  if (ancien) { scene.remove(ancien.sphere); scene.remove(ancien.etiquette); marqueurs[i] = null; }
+  if (ancien) { anchor.remove(ancien.sphere); anchor.remove(ancien.etiquette); marqueurs[i] = null; }
   var pt = points[i];
-  if (!pt.pos || !racine) return;
+  if (!pt.pos || !racine || medianZ_local === null) return;
+
+  var pAncre = versAncre(projeterLocal(pt.pos));
 
   var estCourant = (i === courant);
   var couleur = estCourant ? 0xffd400 : 0x3ddc84;
@@ -674,14 +662,12 @@ function majMarqueur(i) {
     new THREE.MeshBasicMaterial({ color: couleur, depthTest: false, transparent: true, opacity: 0.92 })
   );
   sphere.renderOrder = 900;
-  var wp = pt.pos.clone();
-  racine.localToWorld(wp);
-  sphere.position.copy(wp);
-  scene.add(sphere);
+  sphere.position.copy(pAncre);
+  anchor.add(sphere);
 
   var etq = creerEtiquette(pt.lettre || (i + 1) + '', estCourant ? '#ffe37a' : '#9dffc0');
-  etq.position.copy(wp).add(new THREE.Vector3(0, 0.022, 0));
-  scene.add(etq);
+  etq.position.copy(pAncre).add(new THREE.Vector3(0, 0.022, 0));
+  anchor.add(etq);
 
   marqueurs[i] = { sphere: sphere, etiquette: etq };
   majProjectionEtFilaire();
