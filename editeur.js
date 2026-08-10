@@ -986,6 +986,10 @@ controllers.forEach(function (ctrl, idx) {
         // mondiale actuelle du systeme).
         controllers[autre].attach(anchor);
       } else {
+        // Plus aucune main ne tient : on fige le systeme la ou il est,
+        // en le detachant de la manette (sinon il continuerait a suivre
+        // la main indefiniment).
+        scene.attach(anchor);
         zoomBase = null;
       }
     }
