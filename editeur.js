@@ -936,7 +936,8 @@ function afficherSolutionForce() {
     { texte: 'Vecteur vertical, vers le bas, applique au point H (charge sur la chape).', couleur: '#dfeaf5' },
     { texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' }
   ], [
-    bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerForce)
+    bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerForce),
+    bouton(0, 1, 'CONTINUER',   '#2f7d4f', passerEnIsolementChape)
   ]);
 }
 
@@ -960,6 +961,180 @@ function passerEnForces() {
   panneauPalette.visible = false;
   panneau.visible = true;
   majPanneauForces(null);
+}
+
+// =====================================================================
+//  ETAPE 4 : ISOLEMENT DE LA CHAPE (directions des efforts)
+//
+//  3 forces sur la chape : P en H (connue, etape 3), la reaction du bras
+//  inferieur en D, la reaction du bras superieur en C. Methode des 3
+//  forces concourantes :
+//   1. Le bras inferieur n'a que 2 points (B, D) : piece a 2 forces, sa
+//      direction est portee par (BD). L'etudiant la trace en s'alignant
+//      sur B et D deja places.
+//   2. Pour une piece a 3 forces non paralleles en equilibre, les 3
+//      lignes d'action sont concourantes : l'etudiant identifie donc le
+//      point de concours, intersection de (BD) et de la verticale par H.
+//   3. La direction en C est alors portee par (C -> point de concours),
+//      que l'etudiant trace en s'alignant dessus.
+//  Les lignes de guidage ne sont revelees qu'APRES une reponse jugee
+//  juste, jamais avant (sinon ca fait l'exercice a la place de l'etudiant).
+// =====================================================================
+var TOL_DISTANCE_CONCOURS = 0.025;   // 2,5 cm : tolerance de pointage du point de concours
+
+var etapeChape        = null;   // 'direction_D' | 'concours' | 'direction_C' | 'fini'
+var traceD             = null, traceC = null;   // { fleche, origine, direction } comme traceForce
+var manetteActiveChape = -1;
+var pointConcoursVrai  = null;  // Vector3 ancre-local, calcule (pas affiche avant validation)
+var pointConcoursTrouve = null; // Vector3 ancre-local, pose par l'etudiant une fois juste
+var guideBD = null, guideCConcours = null, marqueurConcours = null;
+
+// Position ancre-locale du marqueur deja affiche pour une lettre donnee
+// (reutilise ce qui a ete calcule a l'etape 2, evite tout recalcul).
+function positionMarqueurAncre(lettre) {
+  for (var i = 0; i < points.length; i++) {
+    if (points[i].lettre === lettre && marqueurs[i]) return marqueurs[i].sphere.position.clone();
+  }
+  return null;
+}
+
+// Intersection de 2 droites du plan (x,y du repere ancre ; z suppose identique
+// pour les deux, ce qui est le cas ici puisque tout vient de versAncre(projeterLocal(...))).
+function intersectionDroites(P1, D1, P2, D2) {
+  var denom = D1.x * D2.y - D1.y * D2.x;
+  if (Math.abs(denom) < 1e-9) return null;   // paralleles
+  var dx = P2.x - P1.x, dy = P2.y - P1.y;
+  var t = (dx * D2.y - dy * D2.x) / denom;
+  return new THREE.Vector3(P1.x + t * D1.x, P1.y + t * D1.y, P1.z);
+}
+
+// Ligne de guidage fine (plus discrete que le filaire), prolongee des 2
+// cotes pour bien montrer l'alignement.
+function creerLigneGuide(p1, p2, couleur) {
+  var dir = p2.clone().sub(p1).normalize();
+  var ext = 0.08;
+  return creerBarre(p1.clone().sub(dir.clone().multiplyScalar(ext)), p2.clone().add(dir.clone().multiplyScalar(ext)), couleur, 0.0018);
+}
+
+// Fait ressortir la chape (opacite pleine) en gardant le reste du modele
+// tres estompe (deja regle par afficherResultatFinal a l'etape 3).
+function mettreEnEvidenceChape() {
+  piecesModele.forEach(function (p) {
+    if (p.nomBase !== 'chape_2') return;
+    p.meshes.forEach(function (m) { m.material.opacity = 1; });
+  });
+}
+
+function calculerGeometrieChape() {
+  var pB = positionMarqueurAncre('B'), pD = positionMarqueurAncre('D');
+  var pH = positionMarqueurAncre('H');
+  if (!pB || !pD || !pH) return false;
+  var dirBD = pD.clone().sub(pB).normalize();
+  pointConcoursVrai = intersectionDroites(pD, dirBD, pH, directionBasAncre());
+  return !!pointConcoursVrai;
+}
+
+function passerEnIsolementChape() {
+  etape = 'isolement_chape';
+  if (!calculerGeometrieChape()) {
+    majPanneau('Impossible de calculer la geometrie (points B, D ou H manquants).');
+    return;
+  }
+  mettreEnEvidenceChape();
+  etapeChape = 'direction_D';
+  panneauPalette.visible = false;
+  panneau.visible = true;
+  majPanneauChape(null);
+}
+
+function recommencerChape() {
+  if (traceD) { anchor.remove(traceD.fleche); traceD = null; }
+  if (traceC) { anchor.remove(traceC.fleche); traceC = null; }
+  if (guideBD) { anchor.remove(guideBD); guideBD = null; }
+  if (guideCConcours) { anchor.remove(guideCConcours); guideCConcours = null; }
+  if (marqueurConcours) { anchor.remove(marqueurConcours); marqueurConcours = null; }
+  pointConcoursTrouve = null;
+  manetteActiveChape = -1;
+  etapeChape = 'direction_D';
+  majPanneauChape(null);
+}
+
+function validerDirectionD() {
+  if (!traceD || !traceD.direction) { majPanneauChape('Trace d\'abord la direction en D.'); return; }
+  var pB = positionMarqueurAncre('B'), pD = positionMarqueurAncre('D');
+  var attendue = pD.clone().sub(pB).normalize();
+  // Une droite n'a pas de sens : on compare a la direction ou a son opposee.
+  var cos = Math.abs(THREE.MathUtils.clamp(traceD.direction.dot(attendue), -1, 1));
+  var angle = THREE.MathUtils.radToDeg(Math.acos(cos));
+
+  if (angle <= TOL_ANGLE_FORCE) {
+    traceD.fleche.userData.mat.color.set(0x3ddc84);
+    guideBD = creerLigneGuide(pB, pD, 0x35c9ff);
+    anchor.add(guideBD);
+    etapeChape = 'concours';
+    majPanneauChape('Direction en D correcte (ecart ' + Math.round(angle) + '°). La droite (BD) est maintenant tracee.');
+  } else {
+    traceD.fleche.userData.mat.color.set(0xff5f5f);
+    majPanneauChape('Direction incorrecte (ecart ' + Math.round(angle) + '°). Aligne-toi sur les points B et D.');
+  }
+}
+
+function validerConcours() {
+  if (!pointConcoursTrouve) { majPanneauChape('Vise l\'intersection des deux droites et appuie sur la gachette.'); return; }
+  var d = pointConcoursTrouve.distanceTo(pointConcoursVrai);
+  if (d <= TOL_DISTANCE_CONCOURS) {
+    marqueurConcours.material.color.set(0x3ddc84);
+    etapeChape = 'direction_C';
+    majPanneauChape('Point de concours correctement identifie.');
+  } else {
+    anchor.remove(marqueurConcours);
+    marqueurConcours = null;
+    pointConcoursTrouve = null;
+    majPanneauChape('Pas tout a fait : vise le croisement entre la droite (BD) et la verticale du poids, en H.');
+  }
+}
+
+function validerDirectionC() {
+  if (!traceC || !traceC.direction) { majPanneauChape('Trace d\'abord la direction en C.'); return; }
+  var pC = positionMarqueurAncre('C');
+  var attendue = pointConcoursVrai.clone().sub(pC).normalize();
+  var cos = Math.abs(THREE.MathUtils.clamp(traceC.direction.dot(attendue), -1, 1));
+  var angle = THREE.MathUtils.radToDeg(Math.acos(cos));
+
+  if (angle <= TOL_ANGLE_FORCE) {
+    traceC.fleche.userData.mat.color.set(0x3ddc84);
+    guideCConcours = creerLigneGuide(pC, pointConcoursVrai, 0x35c9ff);
+    anchor.add(guideCConcours);
+    etapeChape = 'fini';
+    majPanneauChape('Direction en C correcte (ecart ' + Math.round(angle) + '°). Isolement de la chape termine.');
+  } else {
+    traceC.fleche.userData.mat.color.set(0xff5f5f);
+    majPanneauChape('Direction incorrecte (ecart ' + Math.round(angle) + '°). Aligne-toi sur C et le point de concours.');
+  }
+}
+
+function majPanneauChape(message) {
+  var titre = 'Étape 4 — Isolement de la chape';
+  var corps = [];
+  if (etapeChape === 'direction_D') {
+    corps.push('Trace la direction de l\'effort en D : le bras inferieur est une piece a 2 forces, aligne-toi sur les points B et D.');
+  } else if (etapeChape === 'concours') {
+    corps.push('Une piece a 3 forces non paralleles en equilibre a des lignes d\'action concourantes.');
+    corps.push('Vise l\'intersection de la droite (BD) et de la verticale du poids (par H), gachette pour la marquer.');
+  } else if (etapeChape === 'direction_C') {
+    corps.push('Trace la direction de l\'effort en C, en t\'alignant sur C et le point de concours identifie.');
+  } else {
+    corps.push('Les trois directions sont determinees. Isolement de la chape termine.');
+  }
+  corps.push('');
+  if (message) corps.push({ texte: message, couleur: '#ff9f4a' });
+
+  var boutons2 = [bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerChape)];
+  if (etapeChape === 'direction_D') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerDirectionD));
+  else if (etapeChape === 'concours') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerConcours));
+  else if (etapeChape === 'direction_C') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerDirectionC));
+
+  dessinerPanneau(titre, corps, boutons2);
 }
 
 // =====================================================================
@@ -1060,6 +1235,44 @@ controllers.forEach(function (ctrl, idx) {
       return;
     }
 
+    if (etape === 'isolement_chape') {
+      if (etapeChape === 'direction_D') {
+        if (traceD) return;
+        var origineD = positionMarqueurAncre('D');
+        if (!origineD) { majPanneauChape('Point D introuvable.'); return; }
+        var fD = creerFleche(0xffd400, 0.0045);
+        anchor.add(fD);
+        traceD = { fleche: fD, origine: origineD, direction: null };
+        manetteActiveChape = idx;
+        return;
+      }
+      if (etapeChape === 'concours') {
+        if (pointConcoursTrouve) return;   // deja pose : il faut RECOMMENCER pour reessayer
+        var wpConcours = new THREE.Vector3();
+        ctrl.getWorldPosition(wpConcours);
+        pointConcoursTrouve = versAncre(projeterLocal(racine.worldToLocal(wpConcours)));
+        marqueurConcours = new THREE.Mesh(
+          new THREE.SphereGeometry(0.010, 14, 14),
+          new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
+        );
+        marqueurConcours.position.copy(pointConcoursTrouve);
+        anchor.add(marqueurConcours);
+        majPanneauChape(null);
+        return;
+      }
+      if (etapeChape === 'direction_C') {
+        if (traceC) return;
+        var origineC = positionMarqueurAncre('C');
+        if (!origineC) { majPanneauChape('Point C introuvable.'); return; }
+        var fC = creerFleche(0xffd400, 0.0045);
+        anchor.add(fC);
+        traceC = { fleche: fC, origine: origineC, direction: null };
+        manetteActiveChape = idx;
+        return;
+      }
+      return;   // etapeChape === 'fini' : plus rien a tracer
+    }
+
     // etape === 'liaisons' : poser le point courant a l'endroit vise.
     if (derniereVisee) {
       var i = courant;
@@ -1098,6 +1311,30 @@ controllers.forEach(function (ctrl, idx) {
     traceForce.direction = pAncre.clone().sub(traceForce.origine).normalize();
     manetteActiveForce = -1;
     majPanneauForces(null);
+  });
+
+  // Fin des traces de direction de l'etape 4 (D puis C), meme principe que
+  // le trace du poids : la fleche suit la manette jusqu'au relachement.
+  ctrl.addEventListener('selectend', function () {
+    if (etape !== 'isolement_chape' || manetteActiveChape !== idx) return;
+    var traceActive = (etapeChape === 'direction_D') ? traceD : (etapeChape === 'direction_C') ? traceC : null;
+    if (!traceActive) return;
+
+    var wpC = new THREE.Vector3();
+    ctrl.getWorldPosition(wpC);
+    var pAncreC = versAncre(projeterLocal(racine.worldToLocal(wpC)));
+
+    if (traceActive.origine.distanceTo(pAncreC) < LONGUEUR_MIN_FORCE) {
+      anchor.remove(traceActive.fleche);
+      if (etapeChape === 'direction_D') traceD = null; else traceC = null;
+      manetteActiveChape = -1;
+      majPanneauChape('Trace trop court, recommence.');
+      return;
+    }
+    majFleche(traceActive.fleche, traceActive.origine, pAncreC);
+    traceActive.direction = pAncreC.clone().sub(traceActive.origine).normalize();
+    manetteActiveChape = -1;
+    majPanneauChape(null);
   });
 
   // Grip (prehension) : attraper le GROUPE des 2 panneaux (ils bougent
@@ -1241,6 +1478,17 @@ renderer.setAnimationLoop(function (t, frame) {
     controllers[manetteActiveForce].getWorldPosition(wpF);
     var pAncreF = versAncre(projeterLocal(racine.worldToLocal(wpF)));
     majFleche(traceForce.fleche, traceForce.origine, pAncreF);
+  }
+
+  // Traces de direction de l'etape 4 (D puis C), meme principe.
+  if (manetteActiveChape >= 0) {
+    var traceActiveFrame = (etapeChape === 'direction_D') ? traceD : (etapeChape === 'direction_C') ? traceC : null;
+    if (traceActiveFrame) {
+      var wpCh = new THREE.Vector3();
+      controllers[manetteActiveChape].getWorldPosition(wpCh);
+      var pAncreCh = versAncre(projeterLocal(racine.worldToLocal(wpCh)));
+      majFleche(traceActiveFrame.fleche, traceActiveFrame.origine, pAncreCh);
+    }
   }
 
   // Le groupe de panneaux ne suit JAMAIS le systeme : sa position ne
