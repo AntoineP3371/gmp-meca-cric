@@ -23,6 +23,13 @@ function erreur(txt) { errbox.textContent = txt; }
 var MODELE        = 'cric-v1.glb';
 var TAILLE_MODELE = 0.55;   // plus grande dimension du cric affiche, en metres
 
+// --- Tailles des traits/points affiches (regroupees ici pour reglage
+// facile : les pieces du cric sont petites, un trait trop epais les cache).
+var RAYON_MARQUEUR_POINT = 0.006;    // spheres des points (liaisons, concours)
+var RAYON_FLECHE_FORCE   = 0.0028;   // fleche du vecteur force (etape 3 + solution)
+var RAYON_TRAIT_DIRECTION = 0.0018;  // droite de direction (etape 4)
+var RAYON_LIGNE_GUIDE    = 0.0011;   // droite de guidage revelee apres validation
+
 if (typeof THREE === 'undefined') { status.textContent = 'Erreur : Three.js non charge'; return; }
 
 if (!navigator.xr) {
@@ -365,7 +372,7 @@ function viderGroupe(g) {
 // Barre 3D entre deux points (meme repere que le groupe qui la reçoit) :
 // un cylindre, pas une THREE.Line, dont le "linewidth" n'est pas respecte
 // par la plupart des GPU.
-var RAYON_FILAIRE = 0.0035;
+var RAYON_FILAIRE = 0.0022;
 function creerBarre(p1, p2, couleur, rayon) {
   var longueur = p1.distanceTo(p2);
   if (longueur < 1e-5) return null;
@@ -658,7 +665,7 @@ function majMarqueur(i) {
   var estCourant = (i === courant);
   var couleur = estCourant ? 0xffd400 : 0x3ddc84;
   var sphere = new THREE.Mesh(
-    new THREE.SphereGeometry(0.010, 14, 14),
+    new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
     new THREE.MeshBasicMaterial({ color: couleur, depthTest: false, transparent: true, opacity: 0.92 })
   );
   sphere.renderOrder = 900;
@@ -867,6 +874,27 @@ function majFleche(f, depuis, vers) {
   f.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
 }
 
+// Trait simple (sans pointe), pour les DIRECTIONS (etape 4) : a ce stade on
+// ne connait qu'une ligne d'action, pas encore le sens de l'effort. La
+// fleche (avec pointe) reste reservee aux vrais vecteurs force (etape 3).
+function creerTraitSimple(couleur, rayon) {
+  var mat = new THREE.MeshBasicMaterial({ color: couleur, depthTest: false, transparent: true, opacity: 1 });
+  var mesh = new THREE.Mesh(new THREE.CylinderGeometry(rayon, rayon, 1, 10), mat);
+  mesh.userData = { mat: mat };
+  mesh.renderOrder = 890;
+  return mesh;
+}
+function majTraitSimple(mesh, depuis, vers) {
+  var dir = vers.clone().sub(depuis);
+  var longueur = dir.length();
+  if (longueur < 1e-5) { mesh.visible = false; return; }
+  mesh.visible = true;
+  dir.normalize();
+  mesh.scale.set(1, longueur, 1);
+  mesh.position.copy(depuis).lerp(vers, 0.5);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+}
+
 var traceForce         = null;   // { fleche, origine, direction } pendant/apres le trace
 var manetteActiveForce = -1;
 var flecheSolutionForce = null, etiquetteSolutionForce = null;
@@ -923,7 +951,7 @@ function afficherSolutionForce() {
   var longueur = poidsN * ECHELLE_FORCE_M_PAR_N;
   var bout = origine.clone().add(dir.clone().multiplyScalar(longueur));
 
-  flecheSolutionForce = creerFleche(0x3ddc84, 0.005);
+  flecheSolutionForce = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
   anchor.add(flecheSolutionForce);
   majFleche(flecheSolutionForce, origine, bout);
 
@@ -1013,7 +1041,7 @@ function intersectionDroites(P1, D1, P2, D2) {
 function creerLigneGuide(p1, p2, couleur) {
   var dir = p2.clone().sub(p1).normalize();
   var ext = 0.08;
-  return creerBarre(p1.clone().sub(dir.clone().multiplyScalar(ext)), p2.clone().add(dir.clone().multiplyScalar(ext)), couleur, 0.0018);
+  return creerBarre(p1.clone().sub(dir.clone().multiplyScalar(ext)), p2.clone().add(dir.clone().multiplyScalar(ext)), couleur, RAYON_LIGNE_GUIDE);
 }
 
 // Fait ressortir la chape (opacite pleine) en gardant le reste du modele
@@ -1228,7 +1256,7 @@ controllers.forEach(function (ctrl, idx) {
       var pt = pointParLettre('H');
       if (!pt || !pt.pos) { majPanneauForces('Le point H (charge) n\'a pas ete place a l\'etape precedente.'); return; }
       var origineF = versAncre(projeterLocal(pt.pos));
-      var f = creerFleche(0xffd400, 0.0045);
+      var f = creerFleche(0xffd400, RAYON_FLECHE_FORCE);
       anchor.add(f);
       traceForce = { fleche: f, origine: origineF, direction: null };
       manetteActiveForce = idx;
@@ -1240,7 +1268,7 @@ controllers.forEach(function (ctrl, idx) {
         if (traceD) return;
         var origineD = positionMarqueurAncre('D');
         if (!origineD) { majPanneauChape('Point D introuvable.'); return; }
-        var fD = creerFleche(0xffd400, 0.0045);
+        var fD = creerTraitSimple(0xffd400, RAYON_TRAIT_DIRECTION);
         anchor.add(fD);
         traceD = { fleche: fD, origine: origineD, direction: null };
         manetteActiveChape = idx;
@@ -1252,7 +1280,7 @@ controllers.forEach(function (ctrl, idx) {
         ctrl.getWorldPosition(wpConcours);
         pointConcoursTrouve = versAncre(projeterLocal(racine.worldToLocal(wpConcours)));
         marqueurConcours = new THREE.Mesh(
-          new THREE.SphereGeometry(0.010, 14, 14),
+          new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
           new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
         );
         marqueurConcours.position.copy(pointConcoursTrouve);
@@ -1264,7 +1292,7 @@ controllers.forEach(function (ctrl, idx) {
         if (traceC) return;
         var origineC = positionMarqueurAncre('C');
         if (!origineC) { majPanneauChape('Point C introuvable.'); return; }
-        var fC = creerFleche(0xffd400, 0.0045);
+        var fC = creerTraitSimple(0xffd400, RAYON_TRAIT_DIRECTION);
         anchor.add(fC);
         traceC = { fleche: fC, origine: origineC, direction: null };
         manetteActiveChape = idx;
@@ -1331,7 +1359,7 @@ controllers.forEach(function (ctrl, idx) {
       majPanneauChape('Trace trop court, recommence.');
       return;
     }
-    majFleche(traceActive.fleche, traceActive.origine, pAncreC);
+    majTraitSimple(traceActive.fleche, traceActive.origine, pAncreC);
     traceActive.direction = pAncreC.clone().sub(traceActive.origine).normalize();
     manetteActiveChape = -1;
     majPanneauChape(null);
@@ -1487,7 +1515,7 @@ renderer.setAnimationLoop(function (t, frame) {
       var wpCh = new THREE.Vector3();
       controllers[manetteActiveChape].getWorldPosition(wpCh);
       var pAncreCh = versAncre(projeterLocal(racine.worldToLocal(wpCh)));
-      majFleche(traceActiveFrame.fleche, traceActiveFrame.origine, pAncreCh);
+      majTraitSimple(traceActiveFrame.fleche, traceActiveFrame.origine, pAncreCh);
     }
   }
 
