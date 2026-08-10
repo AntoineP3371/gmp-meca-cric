@@ -137,8 +137,7 @@ var courant = 0;
 // =====================================================================
 //  PANNEAU (texture canvas), meme principe que app.js
 // =====================================================================
-// PH agrandi (700 -> 820) pour loger une 3e rangee de boutons (etape liaisons).
-var PW = 1024, PH = 820;
+var PW = 1024, PH = 700;
 var pc = document.createElement('canvas'); pc.width = PW; pc.height = PH;
 var px = pc.getContext('2d');
 var ptex = new THREE.CanvasTexture(pc);
@@ -267,34 +266,13 @@ function construirePieces() {
   });
 }
 
-// Le modele est charge des l'entree en realite mixte (pas au 1er appui
-// gachette) : il est ainsi visible et suit le reticule de visee AVANT
-// d'etre pose, pour que l'utilisateur puisse voir le systeme avant de
-// choisir ou le placer.
-var enAttentePassage = false;   // gachette deja appuyee, mais modele pas encore charge
-
+// Le modele est charge des l'entree en realite mixte, et apparait tout de
+// suite a une position par defaut devant l'utilisateur (pas de mode de
+// placement separe) : il suffit de l'attraper au grip pour le repositionner
+// ou le tourner comme on veut, a tout moment (voir squeezestart/squeezeend).
 function demarrerEtape() {
   if (classesDef && classesDef.classes && classesDef.classes.length) passerEnColoriage();
   else passerEnPlacement();
-}
-
-// Redemarre l'etape EN COURS (sans reinitialiser coloriage/liaisons deja
-// faits) : utilise apres un "DEPLACER LE MODELE", contrairement a
-// demarrerEtape() qui ne sert qu'au tout premier placement.
-function reprendreEtape() {
-  if (etape === 'coloriage') passerEnColoriage();
-  else passerEnPlacement();
-}
-
-// Deplace le modele deja pose : il se remet a suivre la main droite, sans
-// rien perdre (points et couleurs sont stockes independamment de la
-// position de l'ancre). Le prochain appui gachette fige la nouvelle place.
-var deplacementEnCours = false;
-function deplacerSysteme() {
-  deplacementEnCours = true;
-  anchorPlaced = false;
-  panneau.visible = false;
-  panneauPalette.visible = false;
 }
 
 function chargerModele() {
@@ -310,9 +288,18 @@ function chargerModele() {
     piecesModele.forEach(function (p) { meshesModele = meshesModele.concat(p.meshes); });
     calculerPlanMedian();
 
+    // Position de depart : devant l'utilisateur, orientation neutre
+    // (Y vertical) pour ne pas apparaitre incline si le regard est baisse.
+    var pCam = new THREE.Vector3(), qCam = new THREE.Quaternion();
+    camera.getWorldPosition(pCam);
+    camera.getWorldQuaternion(qCam);
+    anchor.position.copy(pCam).add(new THREE.Vector3(0, -0.15, -0.6).applyQuaternion(qCam));
+    anchor.quaternion.identity();
+
     modeleCharge = true;
-    anchor.visible = true;   // apercu visible tout de suite, meme avant la pose
-    if (enAttentePassage) demarrerEtape();
+    anchorPlaced = true;
+    anchor.visible = true;
+    demarrerEtape();
   }, undefined, function (e) { erreur('Erreur GLB : ' + e); });
 }
 
@@ -634,8 +621,7 @@ function majPanneauColoriage(message) {
   dessinerPanneau('Étape 1 — Coloriage des solides', corps, [
     bouton(0, 0, 'VALIDER',      '#2f7d4f', validerColoriage),
     bouton(0, 1, 'TOUT EFFACER', '#7d4f2f', effacerColoriageTout),
-    bouton(0, 2, 'ANNULER',      '#3a5f8a', annulerDerniere),
-    bouton(1, 0, 'DEPLACER', '#4a4a4a', deplacerSysteme)
+    bouton(0, 2, 'ANNULER',      '#3a5f8a', annulerDerniere)
   ]);
 }
 
@@ -852,8 +838,7 @@ function majPanneau(message) {
     bouton(0, 2, 'AJOUTER POINT', '#4a4a4a', ajouterPoint),
     bouton(1, 0, 'SUPPRIMER',     '#7d4f2f', supprimerCourant),
     bouton(1, 1, 'ENREGISTRER',   '#2f7d4f', enregistrer),
-    bouton(1, 2, 'ANNULER',       '#3a5f8a', annulerDerniere),
-    bouton(2, 0, 'DEPLACER', '#4a4a4a', deplacerSysteme)
+    bouton(1, 2, 'ANNULER',       '#3a5f8a', annulerDerniere)
   ]);
 }
 
@@ -873,28 +858,14 @@ var rayon = new THREE.Raycaster();
 var mat4 = new THREE.Matrix4();
 var grabs = [null, null];   // panneau ou panneauPalette actuellement tenu par chaque manette, ou null
 
-// --- Latteralite des manettes (pour faire suivre la main DROITE) --------
-var mainDroite = null, mainGauche = null;   // idx (0 ou 1) une fois connues
-controllers.forEach(function (ctrl, idx) {
-  ctrl.addEventListener('connected', function (event) {
-    var main = event.data && event.data.handedness;
-    if (main === 'right') mainDroite = idx;
-    else if (main === 'left') mainGauche = idx;
-  });
-  ctrl.addEventListener('disconnected', function () {
-    if (mainDroite === idx) mainDroite = null;
-    if (mainGauche === idx) mainGauche = null;
-  });
-});
-// Repli si la latteralite n'est pas encore connue (ex: premiere frame) :
-// par convention WebXR l'index 1 est generalement la main droite.
-function indexMainDroite() { return mainDroite !== null ? mainDroite : 1; }
-
-// --- Rotation (1 grip) et zoom (2 grips) du systeme pose ----------------
-var grabSysteme    = [false, false];
-var qPrecSysteme    = [new THREE.Quaternion(), new THREE.Quaternion()];
-var zoomBase        = null;   // { distance, echelle } au moment ou la 2e main attrape
+// --- Prehension du systeme : 1 grip = attrape et positionne librement
+// (position ET orientation suivent la main, via ctrl.attach), 2 grips =
+// zoom (l'ecart entre les mains pilote l'echelle).
+var grabSysteme = [false, false];   // manette(s) qui tiennent actuellement le systeme
+var zoomBase    = null;             // { distance, echelle } au moment ou la 2e main attrape
 var ECHELLE_MIN = 0.4, ECHELLE_MAX = 2.5;
+var _pAncreMonde = new THREE.Vector3();   // utilitaire : position MONDE de l'ancre, quel que soit son parent actuel
+function positionMondeAncre() { anchor.getWorldPosition(_pAncreMonde); return _pAncreMonde; }
 
 // Reticule : petit anneau qui suit le point vise sur le modele.
 var reticuleVisee = new THREE.Mesh(
@@ -921,17 +892,7 @@ controllers.forEach(function (ctrl, idx) {
   ctrl.add(ligne);
 
   ctrl.addEventListener('selectstart', function () {
-    // 1er appui (ou reappui apres "DEPLACER") : fige la position de
-    // l'apercu (deja visible et suivant la main droite). Si le modele
-    // n'est pas encore charge (reseau lent), on attend juste qu'il le soit.
-    if (!anchorPlaced) {
-      anchorPlaced = true;
-      if (modeleCharge) {
-        if (deplacementEnCours) { deplacementEnCours = false; reprendreEtape(); }
-        else demarrerEtape();
-      } else enAttentePassage = true;
-      return;
-    }
+    if (!modeleCharge) return;   // rien a faire tant que le modele charge (reseau lent)
 
     if (panneau.visible && testerPanneau(ctrl)) return;
     if (panneauPalette.visible && testerPalette(ctrl)) return;
@@ -966,8 +927,8 @@ controllers.forEach(function (ctrl, idx) {
   });
 
   // Grip (prehension) : attraper un panneau flottant pour le repositionner
-  // (comme dans l'app d'assemblage), sinon attraper le systeme pour le
-  // faire tourner (1 main) ou le zoomer (2 mains).
+  // (comme dans l'app d'assemblage), sinon attraper le systeme lui-meme
+  // pour le positionner librement (1 main) ou le zoomer (2 mains).
   ctrl.addEventListener('squeezestart', function () {
     mat4.identity().extractRotation(ctrl.matrixWorld);
     rayon.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
@@ -983,18 +944,23 @@ controllers.forEach(function (ctrl, idx) {
       return;
     }
 
-    // Pas de panneau vise : on attrape le systeme lui-meme.
-    grabSysteme[idx] = true;
-    ctrl.getWorldQuaternion(qPrecSysteme[idx]);
-
+    // Pas de panneau vise : on attrape le systeme.
     var autre = 1 - idx;
     if (grabSysteme[autre]) {
       // La 2e main vient de saisir en plus de la 1ere : on bascule en zoom.
+      // On detache de la main qui le tenait (position/orientation figees,
+      // seule l'echelle bougera tant que les 2 mains tiennent).
+      scene.attach(anchor);
       var p0 = new THREE.Vector3(), p1 = new THREE.Vector3();
       controllers[0].getWorldPosition(p0);
       controllers[1].getWorldPosition(p1);
       zoomBase = { distance: p0.distanceTo(p1), echelle: anchor.scale.x };
+    } else {
+      // 1ere main : le systeme suit desormais cette manette (position ET
+      // orientation), exactement comme on attrape une piece a assembler.
+      ctrl.attach(anchor);
     }
+    grabSysteme[idx] = true;
   });
 
   ctrl.addEventListener('squeezeend', function () {
@@ -1003,7 +969,7 @@ controllers.forEach(function (ctrl, idx) {
       scene.attach(cible);   // reparente a la scene SANS sauter (garde la position mondiale)
       var wp = new THREE.Vector3();
       cible.getWorldPosition(wp);
-      var offsetLocal = wp.clone().sub(anchor.position);
+      var offsetLocal = wp.clone().sub(positionMondeAncre());
       if (cible === panneau) offsetPanneau.copy(offsetLocal);
       else if (cible === panneauPalette) offsetPalette.copy(offsetLocal);
       grabs[idx] = null;
@@ -1012,12 +978,14 @@ controllers.forEach(function (ctrl, idx) {
 
     if (grabSysteme[idx]) {
       grabSysteme[idx] = false;
-      zoomBase = null;
       var autre = 1 - idx;
       if (grabSysteme[autre]) {
-        // Une main relache pendant un zoom : l'autre reprend la rotation
-        // seule, sans saut (on relit son orientation actuelle).
-        controllers[autre].getWorldQuaternion(qPrecSysteme[autre]);
+        // Une main relache pendant un zoom : l'autre reprend la main libre
+        // (position + orientation), sans saut (attach garde la position
+        // mondiale actuelle du systeme).
+        controllers[autre].attach(anchor);
+      } else {
+        zoomBase = null;
       }
     }
   });
@@ -1070,48 +1038,20 @@ function majVisee(ctrl) {
 }
 
 // =====================================================================
-//  PLACEMENT : le systeme suit la main droite jusqu'a la gachette
-//  (remplace le hit-test, peu fiable sur certains casques/navigateurs).
-// =====================================================================
-var OFFSET_MAIN = new THREE.Vector3(0, -0.05, -0.22);   // devant, legerement sous la main
-var _pMain = new THREE.Vector3(), _qMain = new THREE.Quaternion();
-
-function suivreMainDroite() {
-  var idxD = indexMainDroite();
-  var ctrlD = controllers[idxD];
-  if (!ctrlD) return;
-  ctrlD.getWorldPosition(_pMain);
-  ctrlD.getWorldQuaternion(_qMain);
-  anchor.position.copy(_pMain).add(OFFSET_MAIN.clone().applyQuaternion(_qMain));
-}
-
-// =====================================================================
 //  BOUCLE DE RENDU
 // =====================================================================
 var camPos = new THREE.Vector3();
 
 renderer.setAnimationLoop(function (t, frame) {
-  if (frame && !anchorPlaced && modeleCharge) {
-    suivreMainDroite();
-  }
-
-  // Rotation (1 grip) / zoom (2 grips) du systeme, une fois pose ou meme
-  // pendant qu'il suit encore la main.
+  // Zoom a 2 mains : l'ecart entre les manettes pilote l'echelle. Le
+  // positionnement libre a 1 main n'a rien a faire ici, ctrl.attach()
+  // s'en charge tout seul a chaque frame.
   if (grabSysteme[0] && grabSysteme[1] && zoomBase) {
     var p0 = new THREE.Vector3(), p1 = new THREE.Vector3();
     controllers[0].getWorldPosition(p0);
     controllers[1].getWorldPosition(p1);
     var ratio = p0.distanceTo(p1) / Math.max(zoomBase.distance, 1e-4);
     anchor.scale.setScalar(THREE.MathUtils.clamp(zoomBase.echelle * ratio, ECHELLE_MIN, ECHELLE_MAX));
-  } else {
-    for (var kk = 0; kk < 2; kk++) {
-      if (!grabSysteme[kk]) continue;
-      var qActuelle = new THREE.Quaternion();
-      controllers[kk].getWorldQuaternion(qActuelle);
-      var delta = qActuelle.clone().multiply(qPrecSysteme[kk].clone().invert());
-      anchor.quaternion.premultiply(delta);
-      qPrecSysteme[kk].copy(qActuelle);
-    }
   }
 
   // Visee continue avec la premiere manette active (celle qui bouge).
@@ -1123,12 +1063,12 @@ renderer.setAnimationLoop(function (t, frame) {
   // est actuellement tenu par une manette (squeeze) : dans ce cas c'est
   // ctrl.attach() qui gere sa position, on ne doit pas la reecrire ici.
   if (panneau.visible && anchorPlaced && grabs[0] !== panneau && grabs[1] !== panneau) {
-    panneau.position.copy(anchor.position).add(offsetPanneau);
+    panneau.position.copy(positionMondeAncre()).add(offsetPanneau);
     camera.getWorldPosition(camPos);
     panneau.lookAt(camPos.x, panneau.position.y, camPos.z);
   }
   if (panneauPalette.visible && anchorPlaced && grabs[0] !== panneauPalette && grabs[1] !== panneauPalette) {
-    panneauPalette.position.copy(anchor.position).add(offsetPalette);
+    panneauPalette.position.copy(positionMondeAncre()).add(offsetPalette);
     camera.getWorldPosition(camPos);
     panneauPalette.lookAt(camPos.x, panneauPalette.position.y, camPos.z);
   }
