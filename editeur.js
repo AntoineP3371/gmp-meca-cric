@@ -137,6 +137,13 @@ var courant = 0;
 // =====================================================================
 //  PANNEAU (texture canvas), meme principe que app.js
 // =====================================================================
+// Le panneau d'instructions et la palette de couleurs sont regroupes dans
+// UN SEUL objet (groupePanneaux), independant du systeme : attraper l'un
+// ou l'autre au grip deplace les DEUX ensemble, sans jamais toucher au
+// systeme (et attraper le systeme ne deplace jamais les panneaux).
+var groupePanneaux = new THREE.Group();
+scene.add(groupePanneaux);
+
 var PW = 1024, PH = 700;
 var pc = document.createElement('canvas'); pc.width = PW; pc.height = PH;
 var px = pc.getContext('2d');
@@ -146,11 +153,7 @@ var panneau = new THREE.Mesh(
   new THREE.MeshBasicMaterial({ map: ptex, transparent: true })
 );
 panneau.visible = false;
-scene.add(panneau);
-
-// Decalage panneau <-> ancre (repere du monde, pas tourne). Modifiable en
-// attrapant le panneau a la gachette de prehension (voir squeezestart).
-var offsetPanneau = new THREE.Vector3(0, 0.60, 0);
+groupePanneaux.add(panneau);
 
 var boutons = [];
 
@@ -295,6 +298,10 @@ function chargerModele() {
     camera.getWorldQuaternion(qCam);
     anchor.position.copy(pCam).add(new THREE.Vector3(0, -0.15, -0.6).applyQuaternion(qCam));
     anchor.quaternion.identity();
+
+    // Le groupe de panneaux demarre pres du systeme, mais n'est plus jamais
+    // repositionne automatiquement ensuite (seul le grip le deplace).
+    groupePanneaux.position.copy(anchor.position).add(new THREE.Vector3(0, 0.55, 0));
 
     modeleCharge = true;
     anchorPlaced = true;
@@ -444,9 +451,8 @@ var panneauPalette = new THREE.Mesh(
   new THREE.MeshBasicMaterial({ map: pptex, transparent: true })
 );
 panneauPalette.visible = false;
-scene.add(panneauPalette);
-
-var offsetPalette = new THREE.Vector3(0, 0.20, 0);
+panneauPalette.position.set(0, -0.40, 0);   // sous le panneau principal, dans le meme groupe
+groupePanneaux.add(panneauPalette);
 
 var boutonsPalette = [];
 var PALETTE_COLS = 6;
@@ -856,7 +862,7 @@ function passerEnPlacement() {
 var controllers = [renderer.xr.getController(0), renderer.xr.getController(1)];
 var rayon = new THREE.Raycaster();
 var mat4 = new THREE.Matrix4();
-var grabs = [null, null];   // panneau ou panneauPalette actuellement tenu par chaque manette, ou null
+var grabs = [null, null];   // groupePanneaux actuellement tenu par chaque manette, ou null
 
 // --- Prehension du systeme : 1 grip = attrape et positionne librement
 // (position ET orientation suivent la main, via ctrl.attach), 2 grips =
@@ -864,8 +870,6 @@ var grabs = [null, null];   // panneau ou panneauPalette actuellement tenu par c
 var grabSysteme = [false, false];   // manette(s) qui tiennent actuellement le systeme
 var zoomBase    = null;             // { distance, echelle } au moment ou la 2e main attrape
 var ECHELLE_MIN = 0.4, ECHELLE_MAX = 2.5;
-var _pAncreMonde = new THREE.Vector3();   // utilitaire : position MONDE de l'ancre, quel que soit son parent actuel
-function positionMondeAncre() { anchor.getWorldPosition(_pAncreMonde); return _pAncreMonde; }
 
 // Reticule : petit anneau qui suit le point vise sur le modele.
 var reticuleVisee = new THREE.Mesh(
@@ -926,9 +930,11 @@ controllers.forEach(function (ctrl, idx) {
     }
   });
 
-  // Grip (prehension) : attraper un panneau flottant pour le repositionner
-  // (comme dans l'app d'assemblage), sinon attraper le systeme lui-meme
-  // pour le positionner librement (1 main) ou le zoomer (2 mains).
+  // Grip (prehension) : attraper le GROUPE des 2 panneaux (ils bougent
+  // toujours ensemble) pour le repositionner, sinon attraper le systeme
+  // lui-meme pour le positionner librement (1 main) ou le zoomer (2 mains).
+  // Les deux sont totalement independants l'un de l'autre : deplacer l'un
+  // ne deplace jamais l'autre.
   ctrl.addEventListener('squeezestart', function () {
     mat4.identity().extractRotation(ctrl.matrixWorld);
     rayon.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
@@ -939,8 +945,8 @@ controllers.forEach(function (ctrl, idx) {
     if (panneauPalette.visible) cibles.push(panneauPalette);
     var hits = rayon.intersectObjects(cibles, false);
     if (hits.length) {
-      grabs[idx] = hits[0].object;
-      ctrl.attach(hits[0].object);
+      grabs[idx] = groupePanneaux;
+      ctrl.attach(groupePanneaux);
       return;
     }
 
@@ -967,11 +973,6 @@ controllers.forEach(function (ctrl, idx) {
     var cible = grabs[idx];
     if (cible) {
       scene.attach(cible);   // reparente a la scene SANS sauter (garde la position mondiale)
-      var wp = new THREE.Vector3();
-      cible.getWorldPosition(wp);
-      var offsetLocal = wp.clone().sub(positionMondeAncre());
-      if (cible === panneau) offsetPanneau.copy(offsetLocal);
-      else if (cible === panneauPalette) offsetPalette.copy(offsetLocal);
       grabs[idx] = null;
       return;
     }
@@ -1059,18 +1060,13 @@ renderer.setAnimationLoop(function (t, frame) {
     majVisee(controllers[0].visible === false ? controllers[1] : controllers[0]);
   }
 
-  // Position par defaut (offsetPanneau/offsetPalette), sauf si le panneau
-  // est actuellement tenu par une manette (squeeze) : dans ce cas c'est
-  // ctrl.attach() qui gere sa position, on ne doit pas la reecrire ici.
-  if (panneau.visible && anchorPlaced && grabs[0] !== panneau && grabs[1] !== panneau) {
-    panneau.position.copy(positionMondeAncre()).add(offsetPanneau);
+  // Le groupe de panneaux ne suit JAMAIS le systeme : sa position ne
+  // change que si on l'attrape au grip (ctrl.attach() s'en charge tout
+  // seul). On se contente ici de le faire toujours face a l'utilisateur
+  // (rotation uniquement), sauf pendant qu'il est tenu.
+  if ((panneau.visible || panneauPalette.visible) && grabs[0] !== groupePanneaux && grabs[1] !== groupePanneaux) {
     camera.getWorldPosition(camPos);
-    panneau.lookAt(camPos.x, panneau.position.y, camPos.z);
-  }
-  if (panneauPalette.visible && anchorPlaced && grabs[0] !== panneauPalette && grabs[1] !== panneauPalette) {
-    panneauPalette.position.copy(positionMondeAncre()).add(offsetPalette);
-    camera.getWorldPosition(camPos);
-    panneauPalette.lookAt(camPos.x, panneauPalette.position.y, camPos.z);
+    groupePanneaux.lookAt(camPos.x, groupePanneaux.position.y, camPos.z);
   }
 
   renderer.render(scene, camera);
