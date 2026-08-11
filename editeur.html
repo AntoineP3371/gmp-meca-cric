@@ -3,53 +3,56 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Editeur de liaisons - Cric</title>
+  <title>Exercice de mécanique — Statique graphique en VR</title>
   <style>
     body { margin: 0; background: #000; }
     #overlay {
       position: fixed; inset: 0; display: flex; flex-direction: column;
-      align-items: center; justify-content: center; text-align: center;
-      background: rgba(0,0,0,0.92); color: white; font-family: sans-serif;
-      z-index: 10; padding: 20px; box-sizing: border-box; overflow-y: auto;
+      align-items: center; justify-content: flex-end; text-align: center;
+      color: white; font-family: sans-serif; z-index: 10;
+      box-sizing: border-box; pointer-events: none;
     }
-    h1 { font-size: 22px; margin: 0 0 6px; }
-    p  { font-size: 13px; color: #aaa; margin: 0 0 14px; max-width: 460px; }
-    textarea {
-      width: 460px; max-width: 90vw; height: 260px; font-size: 14px;
-      font-family: monospace; padding: 12px; border-radius: 10px;
-      border: 2px solid #444; background: #1a1a1a; color: #eee;
-      margin-bottom: 12px; box-sizing: border-box;
+    #carte {
+      width: 100%; box-sizing: border-box; padding: 22px 20px;
+      background: rgba(12,14,20,0.92); border-top: 1px solid #223;
+      pointer-events: auto; overflow-y: auto; max-height: 80vh;
     }
+    .logos-bar {
+      display: flex; align-items: center; justify-content: center;
+      background: #fff; border-radius: 14px; padding: 10px 20px;
+      margin: 0 auto 14px; width: fit-content;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+    }
+    .logos-bar img { height: 48px; width: auto; display: block; }
+    h1 { font-size: 21px; margin: 0 0 10px; }
+    p  { font-size: 13px; color: #aaa; margin: 0 auto 16px; max-width: 460px; }
     .btn { padding: 14px 30px; font-size: 17px; border: none; border-radius: 12px;
            color: white; cursor: pointer; margin: 5px; background: #e0245e; }
-    .btn-sec { background: #3a5f8a; }
     .btn:disabled { background: #555; }
     #status  { margin-top: 10px; font-size: 13px; color: #aaa; }
-    #errbox  { font-size: 11px; color: #ff6b6b; white-space: pre-wrap; max-width: 90vw; margin-top: 6px; }
+    #errbox  { font-size: 11px; color: #ff6b6b; white-space: pre-wrap; max-width: 90vw; margin: 6px auto 0; }
     canvas { display: block; position: fixed; inset: 0; width: 100%; height: 100%; }
   </style>
 </head>
 <body>
   <div id="overlay">
-    <h1>Editeur de liaisons — Cric</h1>
-    <p>
-      Vérifie ou modifie la liste des points à placer (un par ligne), puis
-      entre en réalité mixte. Dans le casque : vise le centre de chaque
-      liaison sur le modèle et appuie sur la gâchette pour le poser.
-    </p>
-    <textarea id="listePoints">A : bati / bras superieur
-B : bati / bras inferieur
-C : chape / bras superieur
-D : chape / bras inferieur
-E : verin / bati
-F : verin / levier
-G : levier / bras superieur
-H : charge / chape</textarea>
-    <div>
-      <button class="btn" id="btnCommencer">Entrer en réalité mixte</button>
+    <div id="carte">
+      <div class="logos-bar">
+        <img src="logo-gmp.png" alt="IUT GMP Bordeaux" onerror="this.style.display='none'"/>
+      </div>
+      <h1>Exercice de mécanique — Statique graphique en VR</h1>
+      <p>
+        Le cric rouleur affiché ci-dessus doit maintenir une charge de 500 kg
+        en équilibre. Dans le casque, tu vas identifier ses pièces, placer
+        ses liaisons puis résoudre le problème de statique directement sur le
+        système, en réalité mixte.
+      </p>
+      <div>
+        <button class="btn" id="btnCommencer">Entrer en réalité mixte</button>
+      </div>
+      <div id="status">Chargement...</div>
+      <div id="errbox"></div>
     </div>
-    <div id="status">Chargement...</div>
-    <div id="errbox"></div>
   </div>
   <canvas id="c"></canvas>
 
@@ -66,6 +69,6 @@ H : charge / chape</textarea>
 
   <script src="three.min.js"></script>
   <script src="GLTFLoader.js"></script>
-  <script src="editeur.js?v=1.0.0"></script>
+  <script src="editeur.js?v=2.1.0"></script>
 </body>
 </html>

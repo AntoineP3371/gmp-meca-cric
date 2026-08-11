@@ -1,5 +1,5 @@
 // =====================================================================
-//  Editeur de liaisons - v2.0.0
+//  Editeur de liaisons - v2.1.0
 //  Deux etapes en realite mixte :
 //   1. Coloriage : regrouper par couleur les pieces qui forment un meme
 //      solide (classes d'equivalence cinematique). Corrige par
@@ -55,6 +55,17 @@ scene.add(new THREE.AmbientLight(0xffffff, 1.6));
 var dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
 dirLight.position.set(1, 2, 1);
 scene.add(dirLight);
+
+// Taille du canvas : sans effet une fois en VR (le casque impose sa propre
+// resolution), mais necessaire pour que l'apercu 3D s'affiche correctement
+// sur la page d'accueil, avant l'entree en realite mixte.
+function ajusterTailleCanvas() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+ajusterTailleCanvas();
+window.addEventListener('resize', ajusterTailleCanvas);
 
 // --- Etat global --------------------------------------------------------
 var anchor       = new THREE.Group();
@@ -123,16 +134,25 @@ function normaliserToken(s) {
   return s.trim().toLowerCase().replace(/[éèêëàâîïôûùç]/g, function (c) { return ACCENTS[c]; }).replace(/\s+/g, '_');
 }
 
-// --- Liste des points a placer, initialisee depuis le champ texte -----
-// Format attendu : "LETTRE : cote1 / cote2" (ex: "C : chape / bras superieur").
+// --- Liste des points a placer (liaisons A a H, confirmee et figee) -----
+// Format : "LETTRE : cote1 / cote2" (ex: "C : chape / bras superieur").
 // cotes[] sert a rattacher chaque point aux classes de classes.json, pour
 // tracer ensuite la structure filaire de chaque solide colorie.
 var points = [];   // { nom, lettre, cotes:[id,id], pos: THREE.Vector3|null, meshProche: string|null }
 var courant = 0;
 
+var LISTE_POINTS =
+  'A : bati / bras superieur\n' +
+  'B : bati / bras inferieur\n' +
+  'C : chape / bras superieur\n' +
+  'D : chape / bras inferieur\n' +
+  'E : verin / bati\n' +
+  'F : verin / levier\n' +
+  'G : levier / bras superieur\n' +
+  'H : charge / chape';
+
 (function initListe() {
-  var texte = document.getElementById('listePoints').value;
-  texte.split('\n').map(function (l) { return l.trim(); }).filter(Boolean)
+  LISTE_POINTS.split('\n').map(function (l) { return l.trim(); }).filter(Boolean)
     .forEach(function (nom) {
       var lettre = nom.split(':')[0].trim();
       var reste = nom.indexOf(':') >= 0 ? nom.slice(nom.indexOf(':') + 1) : nom;
@@ -276,16 +296,20 @@ function construirePieces() {
   });
 }
 
-// Le modele est charge des l'entree en realite mixte, et apparait tout de
-// suite a une position par defaut devant l'utilisateur (pas de mode de
-// placement separe) : il suffit de l'attraper au grip pour le repositionner
-// ou le tourner comme on veut, a tout moment (voir squeezestart/squeezeend).
 function demarrerEtape() {
   if (classesDef && classesDef.classes && classesDef.classes.length) passerEnColoriage();
   else passerEnPlacement();
 }
 
-function chargerModele() {
+// Charge le modele une seule fois, des l'arrivee sur la page d'accueil (pas
+// besoin d'etre en VR) : il sert tout de suite d'apercu qui tourne devant
+// l'utilisateur (voir la rotation dans la boucle de rendu). Si la session VR
+// a deja demarre au moment ou le chargement se termine (reseau lent), on
+// enchaine directement sur le placement devant l'utilisateur.
+var sessionEnCours = false;
+
+function chargerModeleUnique() {
+  if (modeleCharge || racine) return;
   loader.load(MODELE, function (gltf) {
     racine = gltf.scene;
     ajusterTaille(racine, TAILLE_MODELE);
@@ -298,23 +322,37 @@ function chargerModele() {
     piecesModele.forEach(function (p) { meshesModele = meshesModele.concat(p.meshes); });
     calculerPlanMedian();
 
-    // Position de depart : devant l'utilisateur, orientation neutre
-    // (Y vertical) pour ne pas apparaitre incline si le regard est baisse.
-    var pCam = new THREE.Vector3(), qCam = new THREE.Quaternion();
-    camera.getWorldPosition(pCam);
-    camera.getWorldQuaternion(qCam);
-    anchor.position.copy(pCam).add(new THREE.Vector3(0, -0.15, -0.6).applyQuaternion(qCam));
+    // Position d'apercu sur la page d'accueil : devant la camera par defaut.
+    anchor.position.set(0, -0.05, -0.9);
     anchor.quaternion.identity();
 
-    // Le groupe de panneaux demarre pres du systeme, mais n'est plus jamais
-    // repositionne automatiquement ensuite (seul le grip le deplace).
-    groupePanneaux.position.copy(anchor.position).add(new THREE.Vector3(0, 0.55, 0));
-
     modeleCharge = true;
-    anchorPlaced = true;
     anchor.visible = true;
-    demarrerEtape();
+
+    if (sessionEnCours) placerSystemeDevantUtilisateur();
   }, undefined, function (e) { erreur('Erreur GLB : ' + e); });
+}
+chargerModeleUnique();   // des le chargement de la page, pour l'apercu
+
+// Repositionne le systeme devant l'utilisateur au moment ou il entre en
+// realite mixte (pas de mode de placement separe) : il suffit ensuite de
+// l'attraper au grip pour le repositionner ou le tourner comme on veut, a
+// tout moment (voir squeezestart/squeezeend).
+function placerSystemeDevantUtilisateur() {
+  // Position de depart : devant l'utilisateur, orientation neutre
+  // (Y vertical) pour ne pas apparaitre incline si le regard est baisse.
+  var pCam = new THREE.Vector3(), qCam = new THREE.Quaternion();
+  camera.getWorldPosition(pCam);
+  camera.getWorldQuaternion(qCam);
+  anchor.position.copy(pCam).add(new THREE.Vector3(0, -0.15, -0.6).applyQuaternion(qCam));
+  anchor.quaternion.identity();
+
+  // Le groupe de panneaux demarre pres du systeme, mais n'est plus jamais
+  // repositionne automatiquement ensuite (seul le grip le deplace).
+  groupePanneaux.position.copy(anchor.position).add(new THREE.Vector3(0, 0.55, 0));
+
+  anchorPlaced = true;
+  demarrerEtape();
 }
 
 // =====================================================================
@@ -1389,8 +1427,13 @@ controllers.forEach(function (ctrl, idx) {
     if (panneauPalette.visible && testerPalette(ctrl)) return;
 
     if (etape === 'coloriage') {
-      if (derniereVisee && derniereVisee.pieceIdx !== null) {
-        peindrePiece(derniereVisee.pieceIdx);
+      // Visee recalculee ICI, depuis LA manette qui vient d'appuyer (et non
+      // depuis l'etat partage derniereVisee, mis a jour une fois par frame
+      // pour une seule manette a la fois : sinon peindre avec la "mauvaise"
+      // main ne faisait rien, voir calculerVisee).
+      var viseeColoriage = calculerVisee(ctrl);
+      if (viseeColoriage && viseeColoriage.pieceIdx !== null) {
+        peindrePiece(viseeColoriage.pieceIdx);
       } else {
         majPanneauColoriage('Vise une piece du modele avec le rayon bleu.');
       }
@@ -1448,7 +1491,10 @@ controllers.forEach(function (ctrl, idx) {
     }
 
     // etape === 'liaisons' : poser le point courant a l'endroit vise.
-    if (derniereVisee) {
+    // Visee recalculee ici, depuis LA manette qui vient d'appuyer (voir
+    // calculerVisee : meme raison que pour le coloriage ci-dessus).
+    var viseeLiaison = calculerVisee(ctrl);
+    if (viseeLiaison) {
       var i = courant;
       var ancienPos  = points[i].pos ? points[i].pos.clone() : null;
       var ancienMesh = points[i].meshProche;
@@ -1458,8 +1504,8 @@ controllers.forEach(function (ctrl, idx) {
         majMarqueur(i);
         allerA(i);
       });
-      points[courant].pos = racine.worldToLocal(derniereVisee.point.clone());
-      points[courant].meshProche = derniereVisee.nomMesh;
+      points[courant].pos = racine.worldToLocal(viseeLiaison.point.clone());
+      points[courant].meshProche = viseeLiaison.nomMesh;
       majMarqueur(courant);
       allerA(pointSuivantNonPlace(courant));
     } else {
@@ -1615,25 +1661,37 @@ function raycastPanneau(ctrl, mesh, pw, ph, listeBoutons) {
 function testerPanneau(ctrl) { return raycastPanneau(ctrl, panneau, PW, PH, boutons); }
 function testerPalette(ctrl) { return raycastPanneau(ctrl, panneauPalette, PPW, PPH, boutonsPalette); }
 
-// Raycast continu (hors clic) pour montrer ou la manette pointe sur le modele.
-function majVisee(ctrl) {
-  if (!modeleCharge || !meshesModele.length) { derniereVisee = null; reticuleVisee.visible = false; return; }
+// Raycast ponctuel depuis UNE manette donnee : { point, nomMesh, pieceIdx }
+// ou null si rien vise. Appelee a la fois en continu (reticule, voir
+// majVisee) et fraiche a l'instant du clic (selectstart), pour que peindre
+// ou poser un point utilise toujours la manette qui vient d'appuyer, jamais
+// un etat partage calcule pour une autre manette.
+function calculerVisee(ctrl) {
+  if (!modeleCharge || !meshesModele.length) return null;
   mat4.identity().extractRotation(ctrl.matrixWorld);
   rayon.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
   rayon.ray.direction.set(0, 0, -1).applyMatrix4(mat4);
 
   var hits = rayon.intersectObjects(meshesModele, false);
-  if (hits.length) {
-    derniereVisee = {
-      point: hits[0].point.clone(),
-      nomMesh: hits[0].object.name || null,
-      pieceIdx: (hits[0].object.userData.piece !== undefined) ? hits[0].object.userData.piece : null
-    };
+  if (!hits.length) return null;
+  return {
+    point: hits[0].point.clone(),
+    nomMesh: hits[0].object.name || null,
+    pieceIdx: (hits[0].object.userData.piece !== undefined) ? hits[0].object.userData.piece : null
+  };
+}
+
+// Raycast continu (hors clic) pour montrer ou la manette pointe sur le
+// modele (reticule bleu). Purement visuel : les actions (peindre, poser un
+// point) recalculent toujours leur propre visee via calculerVisee.
+function majVisee(ctrl) {
+  var v = calculerVisee(ctrl);
+  derniereVisee = v;
+  if (v) {
     reticuleVisee.visible = true;
-    reticuleVisee.position.copy(hits[0].point);
+    reticuleVisee.position.copy(v.point);
     reticuleVisee.lookAt(rayon.ray.origin);
   } else {
-    derniereVisee = null;
     reticuleVisee.visible = false;
   }
 }
@@ -1644,6 +1702,12 @@ function majVisee(ctrl) {
 var camPos = new THREE.Vector3();
 
 renderer.setAnimationLoop(function (t, frame) {
+  // Apercu sur la page d'accueil (avant l'entree en VR) : le systeme tourne
+  // lentement devant la camera par defaut, juste pour le montrer.
+  if (modeleCharge && !renderer.xr.isPresenting) {
+    anchor.rotation.y += 0.006;
+  }
+
   // Zoom a 2 mains : l'ecart entre les manettes pilote l'echelle. Le
   // positionnement libre a 1 main n'a rien a faire ici, ctrl.attach()
   // s'en charge tout seul a chaque frame.
@@ -1655,9 +1719,13 @@ renderer.setAnimationLoop(function (t, frame) {
     anchor.scale.setScalar(THREE.MathUtils.clamp(zoomBase.echelle * ratio, ECHELLE_MIN, ECHELLE_MAX));
   }
 
-  // Visee continue avec la premiere manette active (celle qui bouge).
+  // Visee continue (reticule) : quelle que soit la main utilisee, on
+  // affiche le reticule sur celle des deux manettes qui vise effectivement
+  // le modele (sinon celle-ci reste sans effet visuel, mais n'empeche pas
+  // l'autre main de peindre/poser un point : voir calculerVisee).
   if (anchorPlaced && modeleCharge) {
-    majVisee(controllers[0].visible === false ? controllers[1] : controllers[0]);
+    if (!calculerVisee(controllers[0])) majVisee(controllers[1]);
+    else majVisee(controllers[0]);
   }
 
   // Trace du vecteur force (etape 3) : la fleche suit la manette active
@@ -1732,7 +1800,12 @@ function demarrerSessionAR(i) {
     renderer.xr.setSession(session).then(function () {
       overlay.style.display = 'none';
       anchorPlaced = false;
-      if (!modeleCharge) chargerModele();   // charge tout de suite : le modele est visible en apercu avant la pose
+      sessionEnCours = true;
+      // Le modele est deja charge (apercu sur la page d'accueil) dans le cas
+      // normal ; si le chargement n'est pas encore fini (reseau lent),
+      // chargerModeleUnique() enchainera lui-meme sur le placement des que
+      // c'est pret (voir sessionEnCours).
+      if (modeleCharge) placerSystemeDevantUtilisateur();
 
       session.addEventListener('end', function () {
         overlay.style.display = 'flex';
