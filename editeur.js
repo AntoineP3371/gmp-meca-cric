@@ -1,5 +1,5 @@
 // =====================================================================
-//  Editeur de liaisons - v3.1.0
+//  Editeur de liaisons - v3.1.1
 //  Deux etapes en realite mixte :
 //   1. Coloriage : regrouper par couleur les pieces qui forment un meme
 //      solide (classes d'equivalence cinematique). Corrige par
@@ -1682,6 +1682,18 @@ function passerEnIsolementBrasSup() {
   if (flecheCorrigeD) { anchor.remove(flecheCorrigeD); flecheCorrigeD = null; }
   if (flecheCorrigeC) { anchor.remove(flecheCorrigeC); flecheCorrigeC = null; }
 
+  // La reaction en C est connue (action/reaction avec l'etape 5), mais
+  // jusqu'ici seulement par le calcul : rien ne la montrait a l'ecran, ce
+  // qui rendait impossible de viser son intersection avec la droite (FG)
+  // (bug remonte par l'utilisateur). On la trace ici, comme P etait trace
+  // et reste visible tout au long de l'etape 4.
+  var pC6 = positionMarqueurAncre('C');
+  var dirReactionC6 = triangleInfo.origineTriangle.clone().sub(triangleInfo.sommet).normalize().negate();
+  var longueurReactionC6 = triangleInfo.forceC_N * ECHELLE_FORCE_M_PAR_N;
+  flecheReactionC = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+  anchor.add(flecheReactionC);
+  majFleche(flecheReactionC, pC6, pC6.clone().add(dirReactionC6.multiplyScalar(longueurReactionC6)));
+
   mettreEnEvidence('bras_assemblé');
   etapeBrasSup = 'direction_G';
   panneauPalette.visible = false;
@@ -1865,8 +1877,11 @@ function passerEnTriangleBrasSup() {
   if (guideAConcours) { anchor.remove(guideAConcours); guideAConcours = null; }
   if (marqueurConcoursBrasSup) { anchor.remove(marqueurConcoursBrasSup); marqueurConcoursBrasSup = null; }
 
-  flecheReactionC = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
-  anchor.add(flecheReactionC);
+  // flecheReactionC existe deja (tracee des l'entree dans l'etape 6, voir
+  // passerEnIsolementBrasSup) : on se contente de la reactualiser plutot
+  // que d'en recreer une, pour qu'elle reste le meme reperage visuel d'un
+  // bout a l'autre de l'isolement du bras superieur.
+  if (!flecheReactionC) { flecheReactionC = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE); anchor.add(flecheReactionC); }
   majFleche(flecheReactionC, triangleInfoBrasSup.origineTriangle, triangleInfoBrasSup.pointeP);
 
   reinitialiserObjetsTriangleBrasSup();
