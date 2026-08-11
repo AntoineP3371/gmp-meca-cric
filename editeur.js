@@ -1,5 +1,5 @@
 // =====================================================================
-//  Editeur de liaisons - v2.1.0
+//  Editeur de liaisons - v2.2.0
 //  Deux etapes en realite mixte :
 //   1. Coloriage : regrouper par couleur les pieces qui forment un meme
 //      solide (classes d'equivalence cinematique). Corrige par
@@ -1207,26 +1207,45 @@ function majPanneauChape(message) {
 // =====================================================================
 //  ETAPE 5 : TRIANGLE DES FORCES
 //
-//  On reprend P (connu), et les directions en D et en C (etablies a
-//  l'etape 4), pour construire le triangle des forces : bout a bout, en
-//  conservant leur orientation. P est fixe. La droite D part de la pointe
-//  de P ; la droite C part de l'origine de P (son "talon"). Chacune ne
-//  peut s'etirer QUE le long de sa direction imposee (projection de la
-//  main sur cette droite au grip) : on ne choisit jamais l'orientation,
-//  seulement la longueur.
-//
-//  Fermeture du triangle = les deux extremites libres se rejoignent. Pas
-//  de longueur "secrete" revelee avant : l'etudiant voit directement s'il
-//  a ferme ou non, comme dans une vraie construction graphique. Une fois
-//  ferme, la longueur (lue via l'echelle 200N/cm) donne les intensites.
+//  Construction graphique classique, en 3 temps :
+//   1. Les 2 droites d'action (etablies a l'etape 4, directions D et C)
+//      reapparaissent a leur emplacement REEL sur le systeme, deplacables
+//      au grip (translation uniquement, orientation figee). L'etudiant les
+//      amene jusqu'aux 2 extremites du vecteur poids P (deja trace) : la
+//      droite D par la pointe de P, la droite C par son talon.
+//   2. Une fois bien placees, elles se croisent : l'etudiant vise ce
+//      croisement (le "point de resolution" du triangle) et le marque a la
+//      gachette, comme le point de concours de l'etape 4.
+//   3. L'etudiant surligne alors (gachette maintenue, glisser-relacher)
+//      les 2 segments qui representent les efforts reels, dans le bon
+//      sens : de la pointe de P vers le point de resolution (effort D),
+//      puis du point de resolution vers le talon de P (effort C). Comme le
+//      point de resolution est deja fixe, un trace au bon endroit et dans
+//      le bon sens donne directement la bonne longueur : rien a "fermer"
+//      soi-meme, juste a identifier le bon segment.
 // =====================================================================
-var TOL_FERMETURE_TRIANGLE = 0.012;   // ecart accepte entre les 2 extremites, en m
+var TOL_LIGNE_TRIANGLE   = 0.020;   // ecart accepte droite/extremite de P, en m
+var TOL_CONCOURS_TRIANGLE = 0.020;  // ecart accepte pour le point de resolution, en m
+var TOL_EFFORT_TRIANGLE  = 0.025;   // ecart accepte pour l'extremite d'un trace d'effort, en m
+var LONGUEUR_LIGNE_TRIANGLE = 0.12; // demi-longueur affichee des droites deplacables
 
-var triangleInfo = null;   // { origineTriangle, pointeP, dirD, dirC, fermetureVraie, longueurD_vraie, longueurC_vraie, forceD_N, forceC_N }
-var rayD = null, rayC = null;    // { ligne, poignee, origine, direction, longueur }
-var etirement = [null, null];    // par manette : null | 'D' | 'C'
+var etapeTriangle = null;   // 'placer_droites' | 'concours' | 'effort_D' | 'effort_C' | 'fini'
+var triangleInfo  = null;   // { origineTriangle, pointeP, poidsN, sommet, forceD_N, forceC_N }
 var flechePTriangle = null;
 
+var ligneD = null, ligneC = null;   // { mesh, poignee, ancrage: Vector3, direction: Vector3 }
+var glissement = [null, null];      // par manette : null | 'D' | 'C'
+
+var marqueurSommet = null;   // point de resolution, une fois marque
+var sommetTrouve   = null;   // Vector3 (ancre) propose par l'etudiant, avant validation
+
+var traceEffortD = null, traceEffortC = null;   // { fleche, origine, direction, arrivee }
+var manetteActiveEffort = -1;
+
+// Point de resolution du triangle : intersection de la droite (issue de la
+// pointe de P, direction D) et de la droite (issue du talon de P, direction
+// C). Directions reprises telles quelles de l'etape 4 (une droite n'a pas
+// de sens propre, seul le trace final de l'effort en a un).
 function calculerTriangle() {
   var pB = positionMarqueurAncre('B'), pD = positionMarqueurAncre('D'), pC = positionMarqueurAncre('C');
   var pH = positionMarqueurAncre('H');
@@ -1239,42 +1258,72 @@ function calculerTriangle() {
   var pointeP = origineTriangle.clone().add(dirBasT.clone().multiplyScalar(longueurP));
 
   var dirD = pD.clone().sub(pB).normalize();
-  var dirC_ligne = pointConcoursVrai.clone().sub(pC).normalize();
+  var dirC = pointConcoursVrai.clone().sub(pC).normalize();
 
-  var fermeture = intersectionDroites(pointeP, dirD, origineTriangle, dirC_ligne);
-  if (!fermeture) return null;
+  var sommet = intersectionDroites(pointeP, dirD, origineTriangle, dirC);
+  if (!sommet) return null;
 
-  // Le sens (vers la fermeture) est ce qui compte pour l'etirement, pas le
-  // sens arbitraire de dirD/dirC_ligne calcules ci-dessus.
-  var dirDVraie = fermeture.clone().sub(pointeP).normalize();
-  var dirCVraie = fermeture.clone().sub(origineTriangle).normalize();
-  var longueurD_vraie = pointeP.distanceTo(fermeture);
-  var longueurC_vraie = origineTriangle.distanceTo(fermeture);
+  var longueurD = pointeP.distanceTo(sommet);
+  var longueurC = origineTriangle.distanceTo(sommet);
 
   return {
-    origineTriangle: origineTriangle, pointeP: pointeP, poidsN: poidsN,
-    dirD: dirDVraie, dirC: dirCVraie,
-    longueurD_vraie: longueurD_vraie, longueurC_vraie: longueurC_vraie,
-    forceD_N: longueurD_vraie / ECHELLE_FORCE_M_PAR_N,
-    forceC_N: longueurC_vraie / ECHELLE_FORCE_M_PAR_N
+    origineTriangle: origineTriangle, pointeP: pointeP, poidsN: poidsN, sommet: sommet,
+    forceD_N: longueurD / ECHELLE_FORCE_M_PAR_N,
+    forceC_N: longueurC / ECHELLE_FORCE_M_PAR_N
   };
 }
 
-function creerRayon(couleur) {
-  return {
-    ligne: (function () { var l = creerTraitSimple(couleur, RAYON_TRAIT_DIRECTION); anchor.add(l); return l; })(),
-    poignee: (function () {
-      var s = new THREE.Mesh(new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14), new THREE.MeshBasicMaterial({ color: couleur, depthTest: false }));
-      anchor.add(s); return s;
-    })(),
-    longueur: 0
-  };
+// Distance d'un point a une droite (definie par un point et une direction
+// unitaire), dans le plan median (tout est deja projete en amont).
+function distancePointDroite(p, origineDroite, direction) {
+  var v = p.clone().sub(origineDroite);
+  var proj = direction.clone().multiplyScalar(v.dot(direction));
+  return v.clone().sub(proj).length();
 }
 
-function majRayon(r, origine, direction) {
-  var bout = origine.clone().add(direction.clone().multiplyScalar(r.longueur));
-  r.poignee.position.copy(bout);
-  majTraitSimple(r.ligne, origine, bout);
+function creerLigneDeplacable(couleur, ancrage, direction) {
+  var mesh = creerTraitSimple(couleur, RAYON_TRAIT_DIRECTION);
+  anchor.add(mesh);
+  var poignee = new THREE.Mesh(
+    new THREE.SphereGeometry(RAYON_MARQUEUR_POINT * 1.4, 14, 14),
+    new THREE.MeshBasicMaterial({ color: couleur, depthTest: false })
+  );
+  anchor.add(poignee);
+  var l = { mesh: mesh, poignee: poignee, ancrage: ancrage.clone(), direction: direction.clone().normalize() };
+  majLigneDeplacable(l);
+  return l;
+}
+
+function majLigneDeplacable(l) {
+  var demi = l.direction.clone().multiplyScalar(LONGUEUR_LIGNE_TRIANGLE);
+  majTraitSimple(l.mesh, l.ancrage.clone().sub(demi), l.ancrage.clone().add(demi));
+  l.poignee.position.copy(l.ancrage);
+}
+
+function supprimerLigneDeplacable(l) {
+  if (!l) return;
+  anchor.remove(l.mesh);
+  anchor.remove(l.poignee);
+}
+
+// (Re)cree les objets modifiables de l'etape 5 dans leur position initiale
+// (emplacement REEL des droites sur le systeme) : partage entre l'entree
+// dans l'etape et RECOMMENCER.
+function reinitialiserObjetsTriangle() {
+  supprimerLigneDeplacable(ligneD);
+  supprimerLigneDeplacable(ligneC);
+  if (marqueurSommet) { anchor.remove(marqueurSommet); marqueurSommet = null; }
+  if (traceEffortD) { anchor.remove(traceEffortD.fleche); traceEffortD = null; }
+  if (traceEffortC) { anchor.remove(traceEffortC.fleche); traceEffortC = null; }
+  sommetTrouve = null;
+  glissement = [null, null];
+  manetteActiveEffort = -1;
+
+  var pB = positionMarqueurAncre('B'), pD = positionMarqueurAncre('D'), pC = positionMarqueurAncre('C');
+  ligneD = creerLigneDeplacable(0xffd400, pD, pD.clone().sub(pB));
+  ligneC = creerLigneDeplacable(0xffd400, pC, triangleInfo.sommet.clone().sub(pC));
+
+  etapeTriangle = 'placer_droites';
 }
 
 function passerEnTriangle() {
@@ -1286,8 +1335,9 @@ function passerEnTriangle() {
   panneau.visible = true;
 
   // On efface les traces de l'etape 4 (droites de direction, point de
-  // concours) : le triangle des forces est un nouveau schema, pas une
-  // suite visuelle de l'isolement.
+  // concours) : elles reapparaissent juste apres, deplacables (voir
+  // reinitialiserObjetsTriangle), plutot que d'etre une simple suite
+  // visuelle figee de l'isolement.
   if (traceD) { anchor.remove(traceD.fleche); traceD = null; }
   if (traceC) { anchor.remove(traceC.fleche); traceC = null; }
   if (guideBD) { anchor.remove(guideBD); guideBD = null; }
@@ -1298,55 +1348,113 @@ function passerEnTriangle() {
   anchor.add(flechePTriangle);
   majFleche(flechePTriangle, triangleInfo.origineTriangle, triangleInfo.pointeP);
 
-  rayD = creerRayon(0xffd400);
-  rayC = creerRayon(0xffd400);
-  majRayon(rayD, triangleInfo.pointeP, triangleInfo.dirD);
-  majRayon(rayC, triangleInfo.origineTriangle, triangleInfo.dirC);
-
+  reinitialiserObjetsTriangle();
   majPanneauTriangle(null);
 }
 
 function recommencerTriangle() {
-  if (rayD) { rayD.longueur = 0; majRayon(rayD, triangleInfo.pointeP, triangleInfo.dirD); rayD.ligne.userData.mat.color.set(0xffd400); }
-  if (rayC) { rayC.longueur = 0; majRayon(rayC, triangleInfo.origineTriangle, triangleInfo.dirC); rayC.ligne.userData.mat.color.set(0xffd400); }
-  etirement = [null, null];
+  reinitialiserObjetsTriangle();
   majPanneauTriangle(null);
 }
 
-function validerTriangle() {
-  var boutD = rayD.poignee.position, boutC = rayC.poignee.position;
-  var ecart = boutD.distanceTo(boutC);
+function validerLignesTriangle() {
+  var dD = distancePointDroite(triangleInfo.pointeP, ligneD.ancrage, ligneD.direction);
+  var dC = distancePointDroite(triangleInfo.origineTriangle, ligneC.ancrage, ligneC.direction);
 
-  if (ecart <= TOL_FERMETURE_TRIANGLE) {
-    rayD.ligne.userData.mat.color.set(0x3ddc84);
-    rayC.ligne.userData.mat.color.set(0x3ddc84);
-    dessinerPanneau('Étape 5 — Triangle des forces — solution', [
-      { texte: 'Triangle ferme : les 3 forces s\'equilibrent.', couleur: '#3ddc84' },
-      { texte: 'P = ' + Math.round(triangleInfo.poidsN) + ' N', couleur: '#dfeaf5' },
-      { texte: 'Effort en D (bras inferieur) ≈ ' + Math.round(triangleInfo.forceD_N) + ' N', couleur: '#dfeaf5' },
-      { texte: 'Effort en C (bras superieur) ≈ ' + Math.round(triangleInfo.forceC_N) + ' N', couleur: '#dfeaf5' },
-      { texte: 'Echelle : 1 cm = 200 N.', couleur: '#9fd0ff' }
-    ], [
-      bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerTriangle)
-    ]);
+  if (dD <= TOL_LIGNE_TRIANGLE && dC <= TOL_LIGNE_TRIANGLE) {
+    ligneD.mesh.userData.mat.color.set(0x3ddc84);
+    ligneC.mesh.userData.mat.color.set(0x3ddc84);
+    ligneD.poignee.material.color.set(0x3ddc84);
+    ligneC.poignee.material.color.set(0x3ddc84);
+    etapeTriangle = 'concours';
+    majPanneauTriangle('Droites correctement placees.');
   } else {
-    majPanneauTriangle('Pas encore ferme : ecart d\'environ ' + Math.round(ecart / ECHELLE_FORCE_M_PAR_N) + ' N entre les 2 extremites.');
+    var probleme = (dD > TOL_LIGNE_TRIANGLE && dC > TOL_LIGNE_TRIANGLE) ? 'les deux droites ne passent pas encore par les extremites de P'
+      : (dD > TOL_LIGNE_TRIANGLE) ? 'la droite D ne passe pas encore par la pointe de P'
+      : 'la droite C ne passe pas encore par le talon de P';
+    majPanneauTriangle('Pas encore : ' + probleme + '.');
   }
 }
 
+function validerConcoursTriangle() {
+  if (!sommetTrouve) { majPanneauTriangle('Vise le croisement des deux droites et appuie sur la gachette.'); return; }
+  var d = sommetTrouve.distanceTo(triangleInfo.sommet);
+  if (d <= TOL_CONCOURS_TRIANGLE) {
+    // Recale sur la position exacte (pas le clic approximatif de
+    // l'etudiant) : les traces d'effort qui suivent partent d'un point
+    // precis, sans reporter la tolerance de ce clic sur le resultat final.
+    marqueurSommet.position.copy(triangleInfo.sommet);
+    marqueurSommet.material.color.set(0x3ddc84);
+    etapeTriangle = 'effort_D';
+    majPanneauTriangle('Point de resolution correctement identifie.');
+  } else {
+    anchor.remove(marqueurSommet);
+    marqueurSommet = null;
+    sommetTrouve = null;
+    majPanneauTriangle('Pas tout a fait : vise le croisement exact des deux droites.');
+  }
+}
+
+function validerEffortD() {
+  if (!traceEffortD || !traceEffortD.direction) { majPanneauTriangle('Trace d\'abord l\'effort en D : gachette depuis la pointe de P, jusqu\'au point de resolution.'); return; }
+  var d = traceEffortD.arrivee.distanceTo(triangleInfo.sommet);
+  if (d <= TOL_EFFORT_TRIANGLE) {
+    traceEffortD.fleche.userData.mat.color.set(0x3ddc84);
+    etapeTriangle = 'effort_C';
+    majPanneauTriangle('Effort en D correctement trace.');
+  } else {
+    traceEffortD.fleche.userData.mat.color.set(0xff5f5f);
+    majPanneauTriangle('Pas encore : le trace doit aller de la pointe de P jusqu\'au point de resolution, dans ce sens.');
+  }
+}
+
+function validerEffortC() {
+  if (!traceEffortC || !traceEffortC.direction) { majPanneauTriangle('Trace d\'abord l\'effort en C : gachette depuis le point de resolution, jusqu\'au talon de P.'); return; }
+  var d = traceEffortC.arrivee.distanceTo(triangleInfo.origineTriangle);
+  if (d <= TOL_EFFORT_TRIANGLE) {
+    traceEffortC.fleche.userData.mat.color.set(0x3ddc84);
+    etapeTriangle = 'fini';
+    afficherResultatTriangle();
+  } else {
+    traceEffortC.fleche.userData.mat.color.set(0xff5f5f);
+    majPanneauTriangle('Pas encore : le trace doit aller du point de resolution jusqu\'au talon de P (origine du poids), dans ce sens.');
+  }
+}
+
+function afficherResultatTriangle() {
+  dessinerPanneau('Étape 5 — Triangle des forces — résultat', [
+    { texte: 'Triangle des forces complet : les 3 forces s\'equilibrent.', couleur: '#3ddc84' },
+    { texte: 'P = ' + Math.round(triangleInfo.poidsN) + ' N', couleur: '#dfeaf5' },
+    { texte: 'Effort en D (bras inferieur) ≈ ' + Math.round(triangleInfo.forceD_N) + ' N', couleur: '#dfeaf5' },
+    { texte: 'Effort en C (bras superieur) ≈ ' + Math.round(triangleInfo.forceC_N) + ' N', couleur: '#dfeaf5' },
+    { texte: 'Echelle : 1 cm = 200 N.', couleur: '#9fd0ff' }
+  ], [
+    bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerTriangle)
+  ]);
+}
+
 function majPanneauTriangle(message) {
-  var corps = [
-    'Construis le triangle des forces : P est deja place. Attrape (grip) l\'extremite jaune de la droite D et etire-la depuis la pointe de P ; fais de meme pour la droite C depuis le talon de P.',
-    'Les deux extremites doivent se rejoindre : c\'est la fermeture du triangle.',
-    '',
-    { texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' }
-  ];
+  var corps = [];
+  if (etapeTriangle === 'placer_droites') {
+    corps.push('P est deja trace (vert). Attrape (grip) chaque droite jaune par sa poignee et fais-la glisser, sans la faire pivoter, jusqu\'a une extremite de P : la droite D par la pointe, la droite C par le talon.');
+  } else if (etapeTriangle === 'concours') {
+    corps.push('Les deux droites se croisent quelque part : vise ce croisement et appuie sur la gachette pour le marquer.');
+  } else if (etapeTriangle === 'effort_D') {
+    corps.push('Surligne l\'effort en D : gachette maintenue depuis la pointe de P, jusqu\'au point de resolution, puis relache.');
+  } else if (etapeTriangle === 'effort_C') {
+    corps.push('Surligne l\'effort en C : gachette maintenue depuis le point de resolution, jusqu\'au talon de P, puis relache.');
+  }
+  corps.push('');
+  corps.push({ texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' });
   if (message) corps.push({ texte: message, couleur: '#ff9f4a' });
 
-  dessinerPanneau('Étape 5 — Triangle des forces', corps, [
-    bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerTriangle),
-    bouton(0, 1, 'VALIDER',     '#2f7d4f', validerTriangle)
-  ]);
+  var boutons2 = [bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerTriangle)];
+  if (etapeTriangle === 'placer_droites') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerLignesTriangle));
+  else if (etapeTriangle === 'concours') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerConcoursTriangle));
+  else if (etapeTriangle === 'effort_D') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerEffortD));
+  else if (etapeTriangle === 'effort_C') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerEffortC));
+
+  dessinerPanneau('Étape 5 — Triangle des forces', corps, boutons2);
 }
 
 // =====================================================================
@@ -1490,7 +1598,51 @@ controllers.forEach(function (ctrl, idx) {
       return;   // etapeChape === 'fini' : plus rien a tracer
     }
 
+    if (etape === 'triangle') {
+      if (etapeTriangle === 'placer_droites') return;   // rien a faire ici, seul le grip agit
+
+      if (etapeTriangle === 'concours') {
+        if (sommetTrouve) return;   // deja pose : il faut RECOMMENCER pour reessayer
+        var wpSommet = new THREE.Vector3();
+        ctrl.getWorldPosition(wpSommet);
+        sommetTrouve = versAncre(projeterLocal(racine.worldToLocal(wpSommet)));
+        marqueurSommet = new THREE.Mesh(
+          new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
+          new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
+        );
+        marqueurSommet.position.copy(sommetTrouve);
+        anchor.add(marqueurSommet);
+        majPanneauTriangle(null);
+        return;
+      }
+
+      if (etapeTriangle === 'effort_D') {
+        if (traceEffortD) return;
+        var fED = creerFleche(0xffd400, RAYON_FLECHE_FORCE);
+        anchor.add(fED);
+        traceEffortD = { fleche: fED, origine: triangleInfo.pointeP.clone(), direction: null, arrivee: null };
+        manetteActiveEffort = idx;
+        return;
+      }
+
+      if (etapeTriangle === 'effort_C') {
+        if (traceEffortC) return;
+        var fEC = creerFleche(0xffd400, RAYON_FLECHE_FORCE);
+        anchor.add(fEC);
+        traceEffortC = { fleche: fEC, origine: marqueurSommet.position.clone(), direction: null, arrivee: null };
+        manetteActiveEffort = idx;
+        return;
+      }
+
+      return;   // etapeTriangle === 'fini' : plus rien a tracer
+    }
+
     // etape === 'liaisons' : poser le point courant a l'endroit vise.
+    // Garde explicite : sans elle, un clic gachette pendant une autre etape
+    // (par ex. le triangle, avant l'ajout du bloc ci-dessus) retombait ici
+    // par defaut et posait un point parasite (bug remonte par l'utilisateur).
+    if (etape !== 'liaisons') return;
+
     // Visee recalculee ici, depuis LA manette qui vient d'appuyer (voir
     // calculerVisee : meme raison que pour le coloriage ci-dessus).
     var viseeLiaison = calculerVisee(ctrl);
@@ -1557,6 +1709,34 @@ controllers.forEach(function (ctrl, idx) {
     majPanneauChape(null);
   });
 
+  // Fin des traces d'effort de l'etape 5 (D puis C) : meme principe, mais
+  // avec une fleche (le sens compte desormais) et une origine fixee (pointe
+  // de P ou point de resolution), pas celle de la manette. On garde aussi
+  // le point d'arrivee exact (arrivee) : c'est lui qui sera compare au
+  // point de resolution pour valider le trace (voir validerEffortD/C).
+  ctrl.addEventListener('selectend', function () {
+    if (etape !== 'triangle' || manetteActiveEffort !== idx) return;
+    var traceActifEffort = (etapeTriangle === 'effort_D') ? traceEffortD : (etapeTriangle === 'effort_C') ? traceEffortC : null;
+    if (!traceActifEffort) return;
+
+    var wpE = new THREE.Vector3();
+    ctrl.getWorldPosition(wpE);
+    var pAncreE = versAncre(projeterLocal(racine.worldToLocal(wpE)));
+
+    if (traceActifEffort.origine.distanceTo(pAncreE) < LONGUEUR_MIN_FORCE) {
+      anchor.remove(traceActifEffort.fleche);
+      if (etapeTriangle === 'effort_D') traceEffortD = null; else traceEffortC = null;
+      manetteActiveEffort = -1;
+      majPanneauTriangle('Trace trop court, recommence.');
+      return;
+    }
+    majFleche(traceActifEffort.fleche, traceActifEffort.origine, pAncreE);
+    traceActifEffort.direction = pAncreE.clone().sub(traceActifEffort.origine).normalize();
+    traceActifEffort.arrivee = pAncreE.clone();
+    manetteActiveEffort = -1;
+    majPanneauTriangle(null);
+  });
+
   // Grip (prehension) : attraper le GROUPE des 2 panneaux (ils bougent
   // toujours ensemble) pour le repositionner, sinon attraper le systeme
   // lui-meme pour le positionner librement (1 main) ou le zoomer (2 mains).
@@ -1577,12 +1757,13 @@ controllers.forEach(function (ctrl, idx) {
       return;
     }
 
-    // Etape 5 : attraper la poignee de la droite D ou C pour l'etirer.
-    if (etape === 'triangle' && rayD && rayC) {
-      var cibleTriangle = [rayD.poignee, rayC.poignee];
+    // Etape 5 (phase de placement) : attraper la poignee de la droite D ou
+    // C pour la faire glisser (translation libre, orientation figee).
+    if (etape === 'triangle' && etapeTriangle === 'placer_droites' && ligneD && ligneC) {
+      var cibleTriangle = [ligneD.poignee, ligneC.poignee];
       var hitsTriangle = rayon.intersectObjects(cibleTriangle, false);
       if (hitsTriangle.length) {
-        etirement[idx] = (hitsTriangle[0].object === rayD.poignee) ? 'D' : 'C';
+        glissement[idx] = (hitsTriangle[0].object === ligneD.poignee) ? 'D' : 'C';
         return;
       }
     }
@@ -1614,8 +1795,8 @@ controllers.forEach(function (ctrl, idx) {
       return;
     }
 
-    if (etirement[idx]) {
-      etirement[idx] = null;   // la longueur reste telle quelle, figee au relachement
+    if (glissement[idx]) {
+      glissement[idx] = null;   // la droite reste ou elle a ete laissee
       return;
     }
 
@@ -1748,20 +1929,17 @@ renderer.setAnimationLoop(function (t, frame) {
     }
   }
 
-  // Etirement des droites du triangle des forces (etape 5) : la main ne
-  // peut deplacer la poignee QUE le long de la direction imposee (on
-  // projette sa position sur cette droite fixe, jamais de rotation libre).
+  // Glissement des droites du triangle des forces (etape 5, phase de
+  // placement) : la main deplace librement le point par lequel passe la
+  // droite (translation), son orientation reste figee tout du long.
   for (var kt = 0; kt < 2; kt++) {
-    if (!etirement[kt] || !triangleInfo) continue;
+    if (!glissement[kt]) continue;
     var wpT = new THREE.Vector3();
     controllers[kt].getWorldPosition(wpT);
     var pAncreT = versAncre(projeterLocal(racine.worldToLocal(wpT)));
-    var r = (etirement[kt] === 'D') ? rayD : rayC;
-    var origineR = (etirement[kt] === 'D') ? triangleInfo.pointeP : triangleInfo.origineTriangle;
-    var dirR = (etirement[kt] === 'D') ? triangleInfo.dirD : triangleInfo.dirC;
-    var t = Math.max(0, pAncreT.clone().sub(origineR).dot(dirR));
-    r.longueur = t;
-    majRayon(r, origineR, dirR);
+    var l = (glissement[kt] === 'D') ? ligneD : ligneC;
+    l.ancrage.copy(pAncreT);
+    majLigneDeplacable(l);
   }
 
   // Le groupe de panneaux ne suit JAMAIS le systeme : sa position ne
