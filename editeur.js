@@ -1,5 +1,5 @@
 // =====================================================================
-//  Editeur de liaisons - v2.2.0
+//  Editeur de liaisons - v2.3.0
 //  Deux etapes en realite mixte :
 //   1. Coloriage : regrouper par couleur les pieces qui forment un meme
 //      solide (classes d'equivalence cinematique). Corrige par
@@ -171,7 +171,7 @@ var LISTE_POINTS =
 var groupePanneaux = new THREE.Group();
 scene.add(groupePanneaux);
 
-var PW = 1024, PH = 700;
+var PW = 1024, PH = 790;
 var pc = document.createElement('canvas'); pc.width = PW; pc.height = PH;
 var px = pc.getContext('2d');
 var ptex = new THREE.CanvasTexture(pc);
@@ -183,6 +183,90 @@ panneau.visible = false;
 groupePanneaux.add(panneau);
 
 var boutons = [];
+var curseursPanneau = [];
+
+// --- Curseurs d'epaisseur (traits/points), affiches sur les panneaux des
+// etapes 2 a 5 (pas le coloriage, qui n'a ni trait ni point). Reglage
+// global, partage entre toutes les etapes. ------------------------------
+var FACTEUR_EPAISSEUR_MIN = 0.5, FACTEUR_EPAISSEUR_MAX = 2.5;
+var facteurTrait = 1, facteurPoint = 1;
+var curseurActif = [null, null];   // par manette : null | curseur en cours de glissement
+
+function curseur(x1, y1, x2, y2, min, max, valeur, label, onChange) {
+  return { x1: x1, y1: y1, x2: x2, y2: y2, min: min, max: max, valeur: valeur, label: label, onChange: onChange };
+}
+
+function dessinerCurseur(c) {
+  var yMid = (c.y1 + c.y2) / 2;
+  px.strokeStyle = '#3a4a5a'; px.lineWidth = 6; px.lineCap = 'round';
+  px.beginPath(); px.moveTo(c.x1, yMid); px.lineTo(c.x2, yMid); px.stroke();
+
+  var t = (c.valeur - c.min) / (c.max - c.min);
+  var xPoignee = c.x1 + t * (c.x2 - c.x1);
+  px.fillStyle = '#35c9ff';
+  px.beginPath(); px.arc(xPoignee, yMid, 16, 0, Math.PI * 2); px.fill();
+
+  px.fillStyle = '#cfd8e6';
+  px.font = '24px sans-serif';
+  px.textAlign = 'left'; px.textBaseline = 'bottom';
+  px.fillText(c.label + '  ×' + c.valeur.toFixed(1), c.x1, c.y1 - 8);
+  px.textAlign = 'left'; px.textBaseline = 'top';
+}
+
+// Redessine le panneau tel qu'il est actuellement affiche (ecran d'accueil
+// d'une etape ou ecran de resultat/validation), pour faire apparaitre la
+// nouvelle valeur/poignee d'un curseur qu'on est en train de glisser, sans
+// changer d'ecran. dessinerPanneau garde en memoire son dernier appel pour
+// ca (voir plus bas) : on ne peut demarrer un glissement que depuis un
+// panneau qui affiche deja des curseurs, donc pas besoin de re-verifier ici.
+function redessinerPanneauActif() {
+  if (dernierTitrePanneau === null) return;
+  dessinerPanneau(dernierTitrePanneau, dernierCorpsPanneau, dernierBoutonsPanneau, curseursEpaisseurStandard());
+}
+
+function onChangeFacteurTrait(v) { facteurTrait = v; rafraichirEpaisseurs(); redessinerPanneauActif(); }
+function onChangeFacteurPoint(v) { facteurPoint = v; rafraichirEpaisseurs(); redessinerPanneauActif(); }
+
+// Meme emplacement sur tous les panneaux des etapes 2 a 5 : sous les
+// boutons, en bas du panneau.
+function curseursEpaisseurStandard() {
+  return [
+    curseur(44, 676, PW - 44, 696, FACTEUR_EPAISSEUR_MIN, FACTEUR_EPAISSEUR_MAX, facteurTrait, 'Épaisseur des traits', onChangeFacteurTrait),
+    curseur(44, 736, PW - 44, 756, FACTEUR_EPAISSEUR_MIN, FACTEUR_EPAISSEUR_MAX, facteurPoint, 'Taille des points', onChangeFacteurPoint)
+  ];
+}
+
+// Repercute facteurTrait/facteurPoint sur tout ce qui est deja affiche, en
+// pokant directement les echelles des objets existants (voir plus bas :
+// pas de reconstruction). Les CREATIONS futures (nouveau point, nouvelle
+// droite...) reprennent le facteur courant toutes seules, voir majMarqueur/
+// creerBarre/creerLigneDeplacable : le rayon de base est fige dans la
+// geometrie, seul le facteur passe par scale.x/z (ou scale uniforme pour
+// les points), jamais touche ailleurs, donc sans risque d'interference.
+function rafraichirEpaisseurs() {
+  // Poke direct des echelles deja en place (pas de reconstruction : appelee
+  // a chaque frame pendant un glissement de curseur, rafraichirTousMarqueurs
+  // /majProjectionEtFilaire recreeraient etiquettes/geometries a chaque
+  // fois, bien trop couteux a cette frequence).
+  marqueurs.forEach(function (m) { if (m) m.sphere.scale.setScalar(facteurPoint); });
+  groupeFilaire.children.forEach(function (barre) { barre.scale.x = barre.scale.z = facteurTrait; });
+
+  [guideBD, guideCConcours].forEach(function (m) { if (m) { m.scale.x = m.scale.z = facteurTrait; } });
+  [traceD, traceC].forEach(function (t) { if (t) { t.fleche.scale.x = t.fleche.scale.z = facteurTrait; } });
+  [traceForce, traceEffortD, traceEffortC].forEach(function (t) {
+    if (t) { t.fleche.userData.corps.scale.x = t.fleche.userData.corps.scale.z = facteurTrait;
+             t.fleche.userData.tete.scale.x  = t.fleche.userData.tete.scale.z  = facteurTrait; }
+  });
+  [flecheSolutionForce, flechePTriangle].forEach(function (f) {
+    if (f) { f.userData.corps.scale.x = f.userData.corps.scale.z = facteurTrait;
+             f.userData.tete.scale.x  = f.userData.tete.scale.z  = facteurTrait; }
+  });
+  if (ligneD) { ligneD.mesh.scale.x = ligneD.mesh.scale.z = facteurTrait; ligneD.poignee.scale.setScalar(facteurPoint); }
+  if (ligneC) { ligneC.mesh.scale.x = ligneC.mesh.scale.z = facteurTrait; ligneC.poignee.scale.setScalar(facteurPoint); }
+
+  if (marqueurConcours) marqueurConcours.scale.setScalar(facteurPoint);
+  if (marqueurSommet) marqueurSommet.scale.setScalar(facteurPoint);
+}
 
 function coinsArrondis(c, x, y, w, h, r) {
   c.beginPath();
@@ -210,8 +294,14 @@ function couper(c, texte, maxW) {
   return sortie;
 }
 
-function dessinerPanneau(titre, corps, listeBoutons) {
+var dernierTitrePanneau = null, dernierCorpsPanneau = null, dernierBoutonsPanneau = null;
+
+function dessinerPanneau(titre, corps, listeBoutons, listeCurseurs) {
+  dernierTitrePanneau = titre;
+  dernierCorpsPanneau = corps;
+  dernierBoutonsPanneau = listeBoutons;
   boutons = listeBoutons || [];
+  curseursPanneau = listeCurseurs || [];
 
   px.clearRect(0, 0, PW, PH);
   px.fillStyle = 'rgba(12,14,20,0.94)';
@@ -244,6 +334,8 @@ function dessinerPanneau(titre, corps, listeBoutons) {
     px.fillText(b.texte, (b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2);
   });
   px.textAlign = 'left'; px.textBaseline = 'top';
+
+  curseursPanneau.forEach(dessinerCurseur);
 
   ptex.needsUpdate = true;
 }
@@ -420,6 +512,7 @@ function creerBarre(p1, p2, couleur, rayon) {
   );
   barre.position.copy(p1).lerp(p2, 0.5);
   barre.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), p2.clone().sub(p1).normalize());
+  barre.scale.x = barre.scale.z = facteurTrait;
   barre.renderOrder = 880;
   return barre;
 }
@@ -708,6 +801,7 @@ function majMarqueur(i) {
   );
   sphere.renderOrder = 900;
   sphere.position.copy(pAncre);
+  sphere.scale.setScalar(facteurPoint);
   anchor.add(sphere);
 
   var etq = creerEtiquette(pt.lettre || (i + 1) + '', estCourant ? '#ffe37a' : '#9dffc0');
@@ -904,9 +998,9 @@ function majFleche(f, depuis, vers) {
   var d = f.userData;
   var lTete = Math.min(d.rayon * 8, longueur * 0.45);
   var lCorps = longueur - lTete;
-  d.corps.scale.set(1, Math.max(lCorps, 1e-4), 1);
+  d.corps.scale.set(facteurTrait, Math.max(lCorps, 1e-4), facteurTrait);
   d.corps.position.set(0, lCorps / 2, 0);
-  d.tete.scale.set(1, lTete / (d.rayon * 8), 1);
+  d.tete.scale.set(facteurTrait, lTete / (d.rayon * 8), facteurTrait);
   d.tete.position.set(0, lCorps + lTete / 2, 0);
   f.position.copy(depuis);
   f.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
@@ -928,7 +1022,7 @@ function majTraitSimple(mesh, depuis, vers) {
   if (longueur < 1e-5) { mesh.visible = false; return; }
   mesh.visible = true;
   dir.normalize();
-  mesh.scale.set(1, longueur, 1);
+  mesh.scale.set(facteurTrait, longueur, facteurTrait);
   mesh.position.copy(depuis).lerp(vers, 0.5);
   mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
 }
@@ -973,7 +1067,7 @@ function validerForce() {
   dessinerPanneau('Modélisation des forces — résultat', corps, [
     bouton(0, 0, 'RECOMMENCER',      '#7d4f2f', recommencerForce),
     bouton(0, 1, 'VOIR LA SOLUTION', '#2f7d4f', afficherSolutionForce)
-  ]);
+  ], curseursEpaisseurStandard());
 }
 
 function afficherSolutionForce() {
@@ -1004,7 +1098,7 @@ function afficherSolutionForce() {
   ], [
     bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerForce),
     bouton(0, 1, 'CONTINUER',   '#2f7d4f', passerEnIsolementChape)
-  ]);
+  ], curseursEpaisseurStandard());
 }
 
 function majPanneauForces(message) {
@@ -1019,7 +1113,7 @@ function majPanneauForces(message) {
   dessinerPanneau('Modélisation des forces', corps, [
     bouton(0, 0, 'VALIDER',     '#2f7d4f', validerForce),
     bouton(0, 1, 'RECOMMENCER', '#7d4f2f', recommencerForce)
-  ]);
+  ], curseursEpaisseurStandard());
 }
 
 function passerEnForces() {
@@ -1201,7 +1295,7 @@ function majPanneauChape(message) {
   else if (etapeChape === 'direction_C') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerDirectionC));
   else if (etapeChape === 'fini') boutons2.push(bouton(0, 1, 'CONTINUER', '#2f7d4f', passerEnTriangle));
 
-  dessinerPanneau(titre, corps, boutons2);
+  dessinerPanneau(titre, corps, boutons2, curseursEpaisseurStandard());
 }
 
 // =====================================================================
@@ -1288,6 +1382,7 @@ function creerLigneDeplacable(couleur, ancrage, direction) {
     new THREE.SphereGeometry(RAYON_MARQUEUR_POINT * 1.4, 14, 14),
     new THREE.MeshBasicMaterial({ color: couleur, depthTest: false })
   );
+  poignee.scale.setScalar(facteurPoint);
   anchor.add(poignee);
   var l = { mesh: mesh, poignee: poignee, ancrage: ancrage.clone(), direction: direction.clone().normalize() };
   majLigneDeplacable(l);
@@ -1430,7 +1525,7 @@ function afficherResultatTriangle() {
     { texte: 'Echelle : 1 cm = 200 N.', couleur: '#9fd0ff' }
   ], [
     bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerTriangle)
-  ]);
+  ], curseursEpaisseurStandard());
 }
 
 function majPanneauTriangle(message) {
@@ -1454,7 +1549,7 @@ function majPanneauTriangle(message) {
   else if (etapeTriangle === 'effort_D') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerEffortD));
   else if (etapeTriangle === 'effort_C') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerEffortC));
 
-  dessinerPanneau('Étape 5 — Triangle des forces', corps, boutons2);
+  dessinerPanneau('Étape 5 — Triangle des forces', corps, boutons2, curseursEpaisseurStandard());
 }
 
 // =====================================================================
@@ -1478,7 +1573,7 @@ function majPanneau(message) {
     bouton(1, 0, 'SUPPRIMER',     '#7d4f2f', supprimerCourant),
     bouton(1, 1, 'ENREGISTRER',   '#2f7d4f', enregistrer),
     bouton(1, 2, 'ANNULER',       '#3a5f8a', annulerDerniere)
-  ]);
+  ], curseursEpaisseurStandard());
 }
 
 function passerEnPlacement() {
@@ -1531,8 +1626,8 @@ controllers.forEach(function (ctrl, idx) {
   ctrl.addEventListener('selectstart', function () {
     if (!modeleCharge) return;   // rien a faire tant que le modele charge (reseau lent)
 
-    if (panneau.visible && testerPanneau(ctrl)) return;
-    if (panneauPalette.visible && testerPalette(ctrl)) return;
+    if (panneau.visible && testerPanneau(ctrl, idx)) return;
+    if (panneauPalette.visible && testerPalette(ctrl, idx)) return;
 
     if (etape === 'coloriage') {
       // Visee recalculee ICI, depuis LA manette qui vient d'appuyer (et non
@@ -1581,6 +1676,7 @@ controllers.forEach(function (ctrl, idx) {
           new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
         );
         marqueurConcours.position.copy(pointConcoursTrouve);
+        marqueurConcours.scale.setScalar(facteurPoint);
         anchor.add(marqueurConcours);
         majPanneauChape(null);
         return;
@@ -1611,6 +1707,7 @@ controllers.forEach(function (ctrl, idx) {
           new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
         );
         marqueurSommet.position.copy(sommetTrouve);
+        marqueurSommet.scale.setScalar(facteurPoint);
         anchor.add(marqueurSommet);
         majPanneauTriangle(null);
         return;
@@ -1663,6 +1760,13 @@ controllers.forEach(function (ctrl, idx) {
     } else {
       majPanneau('Vise une surface du modele avec le rayon bleu.');
     }
+  });
+
+  // Relachement d'un curseur d'epaisseur (etapes 2 a 5) : inconditionnel,
+  // sans lien avec l'etape en cours (le curseur peut etre glisse depuis
+  // n'importe quel panneau qui en affiche).
+  ctrl.addEventListener('selectend', function () {
+    curseurActif[idx] = null;
   });
 
   // Fin du trace du vecteur force (etape 3) : releve la position finale et
@@ -1822,7 +1926,7 @@ controllers.forEach(function (ctrl, idx) {
 // Raycast generique manette -> panneau canvas : declenche le bouton vise.
 // Retourne true si le panneau a ete touche (meme hors bouton), pour bloquer
 // toute action "derriere" le panneau.
-function raycastPanneau(ctrl, mesh, pw, ph, listeBoutons) {
+function raycastPanneau(ctrl, mesh, pw, ph, listeBoutons, listeCurseurs, idx) {
   mat4.identity().extractRotation(ctrl.matrixWorld);
   rayon.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
   rayon.ray.direction.set(0, 0, -1).applyMatrix4(mat4);
@@ -1837,10 +1941,22 @@ function raycastPanneau(ctrl, mesh, pw, ph, listeBoutons) {
     var b = listeBoutons[i];
     if (cx >= b.x1 && cx <= b.x2 && cy >= b.y1 && cy <= b.y2) { b.action(); return true; }
   }
+  if (listeCurseurs) {
+    for (var j = 0; j < listeCurseurs.length; j++) {
+      var c = listeCurseurs[j];
+      // Marge verticale genereuse : plus facile a attraper qu'un bouton fin.
+      if (cx >= c.x1 && cx <= c.x2 && cy >= c.y1 - 24 && cy <= c.y2 + 24) {
+        curseurActif[idx] = c;
+        c.valeur = c.min + THREE.MathUtils.clamp((cx - c.x1) / (c.x2 - c.x1), 0, 1) * (c.max - c.min);
+        c.onChange(c.valeur);
+        return true;
+      }
+    }
+  }
   return true;
 }
-function testerPanneau(ctrl) { return raycastPanneau(ctrl, panneau, PW, PH, boutons); }
-function testerPalette(ctrl) { return raycastPanneau(ctrl, panneauPalette, PPW, PPH, boutonsPalette); }
+function testerPanneau(ctrl, idx) { return raycastPanneau(ctrl, panneau, PW, PH, boutons, curseursPanneau, idx); }
+function testerPalette(ctrl, idx) { return raycastPanneau(ctrl, panneauPalette, PPW, PPH, boutonsPalette, null, idx); }
 
 // Raycast ponctuel depuis UNE manette donnee : { point, nomMesh, pieceIdx }
 // ou null si rien vise. Appelee a la fois en continu (reticule, voir
@@ -1887,6 +2003,23 @@ renderer.setAnimationLoop(function (t, frame) {
   // lentement devant la camera par defaut, juste pour le montrer.
   if (modeleCharge && !renderer.xr.isPresenting) {
     anchor.rotation.y += 0.006;
+  }
+
+  // Glissement continu d'un curseur d'epaisseur (etapes 2 a 5), tant que la
+  // gachette reste enfoncee dessus : relit la position de la manette sur le
+  // panneau, ajuste la valeur, et repercute en direct sur les objets deja
+  // traces (voir onChangeFacteurTrait/Point -> rafraichirEpaisseurs).
+  for (var kc = 0; kc < 2; kc++) {
+    if (!curseurActif[kc]) continue;
+    mat4.identity().extractRotation(controllers[kc].matrixWorld);
+    rayon.ray.origin.setFromMatrixPosition(controllers[kc].matrixWorld);
+    rayon.ray.direction.set(0, 0, -1).applyMatrix4(mat4);
+    var hitsCurseur = rayon.intersectObject(panneau, false);
+    if (!hitsCurseur.length) continue;
+    var cCurseur = curseurActif[kc];
+    var cxCurseur = hitsCurseur[0].uv.x * PW;
+    cCurseur.valeur = cCurseur.min + THREE.MathUtils.clamp((cxCurseur - cCurseur.x1) / (cCurseur.x2 - cCurseur.x1), 0, 1) * (cCurseur.max - cCurseur.min);
+    cCurseur.onChange(cCurseur.valeur);
   }
 
   // Zoom a 2 mains : l'ecart entre les manettes pilote l'echelle. Le
