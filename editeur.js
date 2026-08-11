@@ -1,5 +1,5 @@
 // =====================================================================
-//  Editeur de liaisons - v3.0.0
+//  Editeur de liaisons - v3.1.0
 //  Deux etapes en realite mixte :
 //   1. Coloriage : regrouper par couleur les pieces qui forment un meme
 //      solide (classes d'equivalence cinematique). Corrige par
@@ -281,6 +281,22 @@ function rafraichirEpaisseurs() {
   if (marqueurSommet) marqueurSommet.scale.setScalar(facteurPoint);
   if (marqueurConcoursBrasSup) marqueurConcoursBrasSup.scale.setScalar(facteurPoint);
   if (marqueurSommetBrasSup) marqueurSommetBrasSup.scale.setScalar(facteurPoint);
+
+  // Etape 8 (bilan) : mêmes pokes, sauf sur un objet en cours d'animation
+  // (sa propre progression pilote deja son echelle, voir animationBilan).
+  var enAnimation = animationBilan ? animationBilan.objets.map(function (o) { return o.mesh; }) : [];
+  [bilanGuideBD, bilanGuideCConcours, bilanGuideFG, bilanGuideAConcours].forEach(function (m) {
+    if (m && enAnimation.indexOf(m) < 0) { m.scale.x = m.scale.z = facteurTrait; }
+  });
+  [bilanFlecheP, bilanFlecheEffortD, bilanFlecheEffortC, bilanFlecheEffortG, bilanFlecheEffortA].forEach(function (f) {
+    if (f && enAnimation.indexOf(f) < 0) {
+      f.userData.corps.scale.x = f.userData.corps.scale.z = facteurTrait;
+      f.userData.tete.scale.x  = f.userData.tete.scale.z  = facteurTrait;
+    }
+  });
+  [bilanMarqueurConcours, bilanMarqueurConcoursBS].forEach(function (m) {
+    if (m && enAnimation.indexOf(m) < 0) { m.scale.setScalar(facteurPoint); }
+  });
 }
 
 function coinsArrondis(c, x, y, w, h, r) {
@@ -1952,7 +1968,8 @@ function afficherResultatTriangleBrasSup() {
     { texte: 'Effort en A (bati) ≈ ' + Math.round(triangleInfoBrasSup.forceA_N) + ' N', couleur: '#dfeaf5' },
     { texte: 'Echelle : 1 cm = 200 N.', couleur: '#9fd0ff' }
   ], [
-    bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerTriangleBrasSup)
+    bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerTriangleBrasSup),
+    bouton(0, 1, 'VOIR LE BILAN', '#2f7d4f', passerEnBilan)
   ], curseursEpaisseurStandard());
 }
 
@@ -1978,6 +1995,217 @@ function majPanneauTriangleBrasSup(message) {
   else if (etapeTriangleBrasSup === 'effort_A') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerEffortA));
 
   dessinerPanneau('Étape 7 — Triangle des forces (bras supérieur)', corps, boutons2, curseursEpaisseurStandard());
+}
+
+// =====================================================================
+//  ETAPE 8 : BILAN
+//
+//  Revue guidee (SUIVANT/PRECEDENT, pas de gachette a utiliser) des 5
+//  grandes phases du raisonnement, chacune avec les tracés qui apparaissent
+//  en s'animant (grandissent depuis leur origine). Tout est recalcule a
+//  partir des donnees deja connues (points, pointConcoursVrai, triangleInfo,
+//  pointConcoursVraiBrasSup, triangleInfoBrasSup) : aucune dependance aux
+//  objets des etapes 4 a 7, qui ont deja ete effaces en cours de route.
+// =====================================================================
+var DUREE_ANIMATION_BILAN = 800;   // ms
+var etapeBilan = 0;
+var animationBilan = null;   // { debut, duree, objets:[{type, mesh, origine, cible}] }
+
+var bilanFlecheP = null;
+var bilanGuideBD = null, bilanMarqueurConcours = null, bilanGuideCConcours = null;
+var bilanFlecheEffortD = null, bilanFlecheEffortC = null;
+var bilanGuideFG = null, bilanMarqueurConcoursBS = null, bilanGuideAConcours = null;
+var bilanFlecheEffortG = null, bilanFlecheEffortA = null;
+
+var TITRES_BILAN = [
+  'Bilan — 1. Le poids de la charge',
+  'Bilan — 2. Isolement de la chape',
+  'Bilan — 3. Triangle des forces (chape)',
+  'Bilan — 4. Isolement du bras supérieur',
+  'Bilan — 5. Triangle des forces (bras supérieur)',
+  'Bilan — Vue d\'ensemble'
+];
+
+function restaurerOpaciteComplete() {
+  piecesModele.forEach(function (p) { p.meshes.forEach(function (m) { m.material.opacity = 1; }); });
+}
+
+function supprimerObjetsBilan() {
+  [bilanFlecheP, bilanGuideBD, bilanMarqueurConcours, bilanGuideCConcours,
+   bilanFlecheEffortD, bilanFlecheEffortC, bilanGuideFG, bilanMarqueurConcoursBS,
+   bilanGuideAConcours, bilanFlecheEffortG, bilanFlecheEffortA].forEach(function (o) { if (o) anchor.remove(o); });
+  bilanFlecheP = null;
+  bilanGuideBD = null; bilanMarqueurConcours = null; bilanGuideCConcours = null;
+  bilanFlecheEffortD = null; bilanFlecheEffortC = null;
+  bilanGuideFG = null; bilanMarqueurConcoursBS = null; bilanGuideAConcours = null;
+  bilanFlecheEffortG = null; bilanFlecheEffortA = null;
+  animationBilan = null;
+}
+
+function demarrerAnimationPhase(objets) {
+  // Si une animation precedente etait encore en cours (clic rapide sur
+  // SUIVANT), on la termine instantanement plutot que de laisser un trace
+  // fige a moitie grandi.
+  if (animationBilan) {
+    animationBilan.objets.forEach(function (o) {
+      if (o.type === 'fleche') majFleche(o.mesh, o.origine, o.cible);
+      else if (o.type === 'trait') majTraitSimple(o.mesh, o.origine, o.cible);
+      else if (o.type === 'point') o.mesh.scale.setScalar(facteurPoint);
+    });
+  }
+  animationBilan = { debut: performance.now(), duree: DUREE_ANIMATION_BILAN, objets: objets };
+}
+
+// Cree (si besoin) et anime les objets propres a la phase etapeBilan.
+function reveelerPhaseBilan() {
+  if (etapeBilan === 0) {
+    restaurerOpaciteComplete();
+    bilanFlecheP = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+    anchor.add(bilanFlecheP);
+    demarrerAnimationPhase([
+      { type: 'fleche', mesh: bilanFlecheP, origine: triangleInfo.origineTriangle, cible: triangleInfo.pointeP }
+    ]);
+  } else if (etapeBilan === 1) {
+    mettreEnEvidence('chape_2');
+    var pB1 = positionMarqueurAncre('B'), pD1 = positionMarqueurAncre('D'), pC1 = positionMarqueurAncre('C');
+    bilanGuideBD = creerTraitSimple(0x35c9ff, RAYON_LIGNE_GUIDE);
+    anchor.add(bilanGuideBD);
+    bilanGuideCConcours = creerTraitSimple(0x35c9ff, RAYON_LIGNE_GUIDE);
+    anchor.add(bilanGuideCConcours);
+    bilanMarqueurConcours = new THREE.Mesh(
+      new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
+      new THREE.MeshBasicMaterial({ color: 0x35c9ff, depthTest: false })
+    );
+    bilanMarqueurConcours.position.copy(pointConcoursVrai);
+    bilanMarqueurConcours.scale.setScalar(0);
+    anchor.add(bilanMarqueurConcours);
+    demarrerAnimationPhase([
+      { type: 'trait', mesh: bilanGuideBD, origine: pB1, cible: pD1 },
+      { type: 'trait', mesh: bilanGuideCConcours, origine: pC1, cible: pointConcoursVrai },
+      { type: 'point', mesh: bilanMarqueurConcours }
+    ]);
+  } else if (etapeBilan === 2) {
+    bilanFlecheEffortD = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+    anchor.add(bilanFlecheEffortD);
+    bilanFlecheEffortC = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+    anchor.add(bilanFlecheEffortC);
+    demarrerAnimationPhase([
+      { type: 'fleche', mesh: bilanFlecheEffortD, origine: triangleInfo.pointeP, cible: triangleInfo.sommet },
+      { type: 'fleche', mesh: bilanFlecheEffortC, origine: triangleInfo.sommet, cible: triangleInfo.origineTriangle }
+    ]);
+  } else if (etapeBilan === 3) {
+    mettreEnEvidence('bras_assemblé');
+    var pF3 = positionMarqueurAncre('F'), pG3 = positionMarqueurAncre('G'), pA3 = positionMarqueurAncre('A');
+    bilanGuideFG = creerTraitSimple(0x35c9ff, RAYON_LIGNE_GUIDE);
+    anchor.add(bilanGuideFG);
+    bilanGuideAConcours = creerTraitSimple(0x35c9ff, RAYON_LIGNE_GUIDE);
+    anchor.add(bilanGuideAConcours);
+    bilanMarqueurConcoursBS = new THREE.Mesh(
+      new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
+      new THREE.MeshBasicMaterial({ color: 0x35c9ff, depthTest: false })
+    );
+    bilanMarqueurConcoursBS.position.copy(pointConcoursVraiBrasSup);
+    bilanMarqueurConcoursBS.scale.setScalar(0);
+    anchor.add(bilanMarqueurConcoursBS);
+    demarrerAnimationPhase([
+      { type: 'trait', mesh: bilanGuideFG, origine: pF3, cible: pG3 },
+      { type: 'trait', mesh: bilanGuideAConcours, origine: pA3, cible: pointConcoursVraiBrasSup },
+      { type: 'point', mesh: bilanMarqueurConcoursBS }
+    ]);
+  } else if (etapeBilan === 4) {
+    bilanFlecheEffortG = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+    anchor.add(bilanFlecheEffortG);
+    bilanFlecheEffortA = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+    anchor.add(bilanFlecheEffortA);
+    demarrerAnimationPhase([
+      { type: 'fleche', mesh: bilanFlecheEffortG, origine: triangleInfoBrasSup.pointeP, cible: triangleInfoBrasSup.sommet },
+      { type: 'fleche', mesh: bilanFlecheEffortA, origine: triangleInfoBrasSup.sommet, cible: triangleInfoBrasSup.origineTriangle }
+    ]);
+  } else {
+    // Vue d'ensemble : rien de nouveau a tracer, tout est deja affiche.
+    restaurerOpaciteComplete();
+  }
+}
+
+function passerEnBilan() {
+  etape = 'bilan';
+  panneauPalette.visible = false;
+  panneau.visible = true;
+
+  // L'etape 7 est terminee : on efface ses objets et on remet tout le
+  // mecanisme visible, le bilan etant une vue d'ensemble et non plus
+  // l'isolement d'une seule piece.
+  if (flecheReactionC) { anchor.remove(flecheReactionC); flecheReactionC = null; }
+  supprimerLigneDeplacable(ligneG); ligneG = null;
+  supprimerLigneDeplacable(ligneA); ligneA = null;
+  if (marqueurSommetBrasSup) { anchor.remove(marqueurSommetBrasSup); marqueurSommetBrasSup = null; }
+  if (traceEffortG) { anchor.remove(traceEffortG.fleche); traceEffortG = null; }
+  if (traceEffortA) { anchor.remove(traceEffortA.fleche); traceEffortA = null; }
+  if (flecheCorrigeG) { anchor.remove(flecheCorrigeG); flecheCorrigeG = null; }
+  if (flecheCorrigeA) { anchor.remove(flecheCorrigeA); flecheCorrigeA = null; }
+
+  demarrerBilan();
+}
+
+// (Re)demarre la revue depuis le debut : entree dans l'etape et bouton REVOIR.
+function demarrerBilan() {
+  supprimerObjetsBilan();
+  etapeBilan = 0;
+  reveelerPhaseBilan();
+  majPanneauBilan();
+}
+
+function suivantBilan() {
+  if (etapeBilan >= 5) return;
+  etapeBilan++;
+  reveelerPhaseBilan();
+  majPanneauBilan();
+}
+
+function precedentBilan() {
+  if (etapeBilan <= 0) return;
+  etapeBilan--;   // navigation pure : ce qui a deja ete revele le reste
+  majPanneauBilan();
+}
+
+function majPanneauBilan() {
+  var corps = [];
+  if (etapeBilan === 0) {
+    corps.push('La charge de ' + MASSE_CHARGE_KG + ' kg s\'applique au point H, verticalement vers le bas.');
+    corps.push({ texte: 'P = m·g = ' + MASSE_CHARGE_KG + ' × ' + G + ' ≈ ' + Math.round(triangleInfo.poidsN) + ' N', couleur: '#dfeaf5' });
+  } else if (etapeBilan === 1) {
+    corps.push('La chape est soumise a 3 forces non paralleles (P, et les reactions en D et C) : leurs lignes d\'action sont concourantes.');
+    corps.push('Le bras inferieur, piece a 2 forces, donne directement la direction en D. Le point de concours (intersection avec la verticale de P) donne alors la direction en C.');
+  } else if (etapeBilan === 2) {
+    corps.push('Le triangle des forces sur la chape (P, effort D, effort C, trace bout a bout) donne les intensites :');
+    corps.push({ texte: 'Effort en D (bras inferieur) ≈ ' + Math.round(triangleInfo.forceD_N) + ' N', couleur: '#dfeaf5' });
+    corps.push({ texte: 'Effort en C (bras superieur) ≈ ' + Math.round(triangleInfo.forceC_N) + ' N', couleur: '#dfeaf5' });
+  } else if (etapeBilan === 3) {
+    corps.push('Sur le bras superieur : la reaction en C est connue par action/reaction avec l\'effort calcule a l\'etape precedente.');
+    corps.push('Le levier, piece a 2 forces, donne directement la direction en G. Le point de concours donne alors la direction en A.');
+  } else if (etapeBilan === 4) {
+    corps.push('Le triangle des forces sur le bras superieur donne les intensites :');
+    corps.push({ texte: 'Effort en G (levier) ≈ ' + Math.round(triangleInfoBrasSup.forceG_N) + ' N', couleur: '#dfeaf5' });
+    corps.push({ texte: 'Effort en A (bati) ≈ ' + Math.round(triangleInfoBrasSup.forceA_N) + ' N', couleur: '#dfeaf5' });
+  } else {
+    corps.push('Recapitulatif complet :');
+    corps.push({ texte: 'Poids P                      ≈ ' + Math.round(triangleInfo.poidsN) + ' N', couleur: '#dfeaf5' });
+    corps.push({ texte: 'Effort en D (bras inferieur)  ≈ ' + Math.round(triangleInfo.forceD_N) + ' N', couleur: '#dfeaf5' });
+    corps.push({ texte: 'Effort en C (bras superieur)  ≈ ' + Math.round(triangleInfo.forceC_N) + ' N', couleur: '#dfeaf5' });
+    corps.push({ texte: 'Effort en G (levier)          ≈ ' + Math.round(triangleInfoBrasSup.forceG_N) + ' N', couleur: '#dfeaf5' });
+    corps.push({ texte: 'Effort en A (bati)             ≈ ' + Math.round(triangleInfoBrasSup.forceA_N) + ' N', couleur: '#dfeaf5' });
+  }
+  corps.push('');
+  corps.push({ texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' });
+  corps.push({ texte: (etapeBilan + 1) + ' / 6', couleur: '#9fd0ff' });
+
+  var boutons2 = [
+    bouton(0, 0, '< PRECEDENT', '#3a5f8a', precedentBilan),
+    bouton(0, 1, 'SUIVANT >',   '#3a5f8a', suivantBilan)
+  ];
+  if (etapeBilan === 5) boutons2.push(bouton(0, 2, 'REVOIR', '#4a4a4a', demarrerBilan));
+
+  dessinerPanneau(TITRES_BILAN[etapeBilan], corps, boutons2, curseursEpaisseurStandard());
 }
 
 // =====================================================================
@@ -2692,6 +2920,23 @@ renderer.setAnimationLoop(function (t, frame) {
     var lBS = (glissementBrasSup[ktBS] === 'G') ? ligneG : ligneA;
     lBS.ancrage.copy(pAncreTBS);
     majLigneDeplacable(lBS);
+  }
+
+  // Animation du bilan (etape 8) : les objets de la phase en cours
+  // grandissent depuis leur origine jusqu'a leur cible.
+  if (animationBilan) {
+    var progressBilan = THREE.MathUtils.clamp((performance.now() - animationBilan.debut) / animationBilan.duree, 0, 1);
+    var easedBilan = progressBilan * progressBilan * (3 - 2 * progressBilan);   // smoothstep
+    animationBilan.objets.forEach(function (o) {
+      if (o.type === 'fleche') {
+        majFleche(o.mesh, o.origine, o.origine.clone().lerp(o.cible, easedBilan));
+      } else if (o.type === 'trait') {
+        majTraitSimple(o.mesh, o.origine, o.origine.clone().lerp(o.cible, easedBilan));
+      } else if (o.type === 'point') {
+        o.mesh.scale.setScalar(facteurPoint * easedBilan);
+      }
+    });
+    if (progressBilan >= 1) animationBilan = null;
   }
 
   // Le groupe de panneaux ne suit JAMAIS le systeme : sa position ne
