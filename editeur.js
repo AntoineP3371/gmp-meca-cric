@@ -1,5 +1,5 @@
 // =====================================================================
-//  Editeur de liaisons - v2.3.0
+//  Editeur de liaisons - v2.4.0
 //  Deux etapes en realite mixte :
 //   1. Coloriage : regrouper par couleur les pieces qui forment un meme
 //      solide (classes d'equivalence cinematique). Corrige par
@@ -171,7 +171,7 @@ var LISTE_POINTS =
 var groupePanneaux = new THREE.Group();
 scene.add(groupePanneaux);
 
-var PW = 1024, PH = 790;
+var PW = 1024, PH = 880;
 var pc = document.createElement('canvas'); pc.width = PW; pc.height = PH;
 var px = pc.getContext('2d');
 var ptex = new THREE.CanvasTexture(pc);
@@ -188,7 +188,7 @@ var curseursPanneau = [];
 // --- Curseurs d'epaisseur (traits/points), affiches sur les panneaux des
 // etapes 2 a 5 (pas le coloriage, qui n'a ni trait ni point). Reglage
 // global, partage entre toutes les etapes. ------------------------------
-var FACTEUR_EPAISSEUR_MIN = 0.5, FACTEUR_EPAISSEUR_MAX = 2.5;
+var FACTEUR_EPAISSEUR_MIN = 0.15, FACTEUR_EPAISSEUR_MAX = 2.5;
 var facteurTrait = 1, facteurPoint = 1;
 var curseurActif = [null, null];   // par manette : null | curseur en cours de glissement
 
@@ -228,11 +228,14 @@ function onChangeFacteurTrait(v) { facteurTrait = v; rafraichirEpaisseurs(); red
 function onChangeFacteurPoint(v) { facteurPoint = v; rafraichirEpaisseurs(); redessinerPanneauActif(); }
 
 // Meme emplacement sur tous les panneaux des etapes 2 a 5 : sous les
-// boutons, en bas du panneau.
+// boutons (qui s'arretent a y=650), en bas du panneau. Marge large entre
+// les boutons et le 1er curseur, et entre les 2 curseurs : le libelle
+// (dessine au-dessus de la piste, voir dessinerCurseur) a besoin de place
+// sans chevaucher ce qui est au-dessus.
 function curseursEpaisseurStandard() {
   return [
-    curseur(44, 676, PW - 44, 696, FACTEUR_EPAISSEUR_MIN, FACTEUR_EPAISSEUR_MAX, facteurTrait, 'Épaisseur des traits', onChangeFacteurTrait),
-    curseur(44, 736, PW - 44, 756, FACTEUR_EPAISSEUR_MIN, FACTEUR_EPAISSEUR_MAX, facteurPoint, 'Taille des points', onChangeFacteurPoint)
+    curseur(44, 712, PW - 44, 732, FACTEUR_EPAISSEUR_MIN, FACTEUR_EPAISSEUR_MAX, facteurTrait, 'Épaisseur des traits', onChangeFacteurTrait),
+    curseur(44, 812, PW - 44, 832, FACTEUR_EPAISSEUR_MIN, FACTEUR_EPAISSEUR_MAX, facteurPoint, 'Taille des points', onChangeFacteurPoint)
   ];
 }
 
@@ -248,7 +251,14 @@ function rafraichirEpaisseurs() {
   // a chaque frame pendant un glissement de curseur, rafraichirTousMarqueurs
   // /majProjectionEtFilaire recreeraient etiquettes/geometries a chaque
   // fois, bien trop couteux a cette frequence).
-  marqueurs.forEach(function (m) { if (m) m.sphere.scale.setScalar(facteurPoint); });
+  marqueurs.forEach(function (m) {
+    if (!m) return;
+    m.sphere.scale.setScalar(facteurPoint);
+    // Repositionne l'etiquette (juste sa position, pas de recreation de
+    // texture) pour qu'elle reste au-dessus du point meme pendant le
+    // glissement du curseur, sans le cout d'une reconstruction complete.
+    m.etiquette.position.copy(m.sphere.position).add(new THREE.Vector3(0, RAYON_MARQUEUR_POINT * facteurPoint + 0.016, 0));
+  });
   groupeFilaire.children.forEach(function (barre) { barre.scale.x = barre.scale.z = facteurTrait; });
 
   [guideBD, guideCConcours].forEach(function (m) { if (m) { m.scale.x = m.scale.z = facteurTrait; } });
@@ -257,7 +267,7 @@ function rafraichirEpaisseurs() {
     if (t) { t.fleche.userData.corps.scale.x = t.fleche.userData.corps.scale.z = facteurTrait;
              t.fleche.userData.tete.scale.x  = t.fleche.userData.tete.scale.z  = facteurTrait; }
   });
-  [flecheSolutionForce, flechePTriangle].forEach(function (f) {
+  [flecheSolutionForce, flechePTriangle, flecheCorrigeD, flecheCorrigeC].forEach(function (f) {
     if (f) { f.userData.corps.scale.x = f.userData.corps.scale.z = facteurTrait;
              f.userData.tete.scale.x  = f.userData.tete.scale.z  = facteurTrait; }
   });
@@ -804,8 +814,11 @@ function majMarqueur(i) {
   sphere.scale.setScalar(facteurPoint);
   anchor.add(sphere);
 
+  // Decalage proportionnel a la taille actuelle du point (RAYON_MARQUEUR_POINT
+  // * facteurPoint) : sinon un point agrandi via le curseur finit par passer
+  // par-dessus sa propre etiquette (decalage fixe insuffisant).
   var etq = creerEtiquette(pt.lettre || (i + 1) + '', estCourant ? '#ffe37a' : '#9dffc0');
-  etq.position.copy(pAncre).add(new THREE.Vector3(0, 0.022, 0));
+  etq.position.copy(pAncre).add(new THREE.Vector3(0, RAYON_MARQUEUR_POINT * facteurPoint + 0.016, 0));
   anchor.add(etq);
 
   marqueurs[i] = { sphere: sphere, etiquette: etq };
@@ -1321,7 +1334,7 @@ function majPanneauChape(message) {
 var TOL_LIGNE_TRIANGLE   = 0.020;   // ecart accepte droite/extremite de P, en m
 var TOL_CONCOURS_TRIANGLE = 0.020;  // ecart accepte pour le point de resolution, en m
 var TOL_EFFORT_TRIANGLE  = 0.025;   // ecart accepte pour l'extremite d'un trace d'effort, en m
-var LONGUEUR_LIGNE_TRIANGLE = 0.12; // demi-longueur affichee des droites deplacables
+var LONGUEUR_LIGNE_TRIANGLE = 0.30; // demi-longueur affichee des droites deplacables
 
 var etapeTriangle = null;   // 'placer_droites' | 'concours' | 'effort_D' | 'effort_C' | 'fini'
 var triangleInfo  = null;   // { origineTriangle, pointeP, poidsN, sommet, forceD_N, forceC_N }
@@ -1335,6 +1348,8 @@ var sommetTrouve   = null;   // Vector3 (ancre) propose par l'etudiant, avant va
 
 var traceEffortD = null, traceEffortC = null;   // { fleche, origine, direction, arrivee }
 var manetteActiveEffort = -1;
+
+var flecheCorrigeD = null, flecheCorrigeC = null;   // corrige exact, affiche une fois le triangle juste
 
 // Point de resolution du triangle : intersection de la droite (issue de la
 // pointe de P, direction D) et de la droite (issue du talon de P, direction
@@ -1410,6 +1425,8 @@ function reinitialiserObjetsTriangle() {
   if (marqueurSommet) { anchor.remove(marqueurSommet); marqueurSommet = null; }
   if (traceEffortD) { anchor.remove(traceEffortD.fleche); traceEffortD = null; }
   if (traceEffortC) { anchor.remove(traceEffortC.fleche); traceEffortC = null; }
+  if (flecheCorrigeD) { anchor.remove(flecheCorrigeD); flecheCorrigeD = null; }
+  if (flecheCorrigeC) { anchor.remove(flecheCorrigeC); flecheCorrigeC = null; }
   sommetTrouve = null;
   glissement = [null, null];
   manetteActiveEffort = -1;
@@ -1516,7 +1533,24 @@ function validerEffortC() {
   }
 }
 
+// Affiche un corrige exact (le vrai triangle, tel que calcule) une fois les
+// 2 efforts correctement traces : le trace "grossier" de l'etudiant est
+// estompe, comme la solution de l'etape 3.
+function afficherCorrigeTriangle() {
+  if (traceEffortD) traceEffortD.fleche.userData.mat.opacity = 0.35;
+  if (traceEffortC) traceEffortC.fleche.userData.mat.opacity = 0.35;
+
+  flecheCorrigeD = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+  anchor.add(flecheCorrigeD);
+  majFleche(flecheCorrigeD, triangleInfo.pointeP, triangleInfo.sommet);
+
+  flecheCorrigeC = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+  anchor.add(flecheCorrigeC);
+  majFleche(flecheCorrigeC, triangleInfo.sommet, triangleInfo.origineTriangle);
+}
+
 function afficherResultatTriangle() {
+  afficherCorrigeTriangle();
   dessinerPanneau('Étape 5 — Triangle des forces — résultat', [
     { texte: 'Triangle des forces complet : les 3 forces s\'equilibrent.', couleur: '#3ddc84' },
     { texte: 'P = ' + Math.round(triangleInfo.poidsN) + ' N', couleur: '#dfeaf5' },
@@ -1612,10 +1646,12 @@ var derniereVisee = null;   // { point: Vector3(monde), nomMesh: string } ou nul
 
 controllers.forEach(function (ctrl, idx) {
   scene.add(ctrl);
-  ctrl.add(new THREE.Mesh(
+  var pointeManette = new THREE.Mesh(
     new THREE.SphereGeometry(0.008, 10, 10),
-    new THREE.MeshBasicMaterial({ color: 0xffffff })
-  ));
+    new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false })
+  );
+  pointeManette.renderOrder = 999;   // toujours dessinee au-dessus (jamais cachee par le modele/un panneau)
+  ctrl.add(pointeManette);
   var ligne = new THREE.Line(
     new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]),
     new THREE.LineBasicMaterial({ color: 0x35c9ff, transparent: true, opacity: 0.5 })
@@ -2059,6 +2095,19 @@ renderer.setAnimationLoop(function (t, frame) {
       controllers[manetteActiveChape].getWorldPosition(wpCh);
       var pAncreCh = versAncre(projeterLocal(racine.worldToLocal(wpCh)));
       majTraitSimple(traceActiveFrame.fleche, traceActiveFrame.origine, pAncreCh);
+    }
+  }
+
+  // Traces d'effort de l'etape 5 (D puis C), meme principe : sans ce bloc,
+  // la fleche ne suivait la manette qu'au relachement (bug remonte par
+  // l'utilisateur, "je ne vois pas la fleche pendant le trace").
+  if (etape === 'triangle' && manetteActiveEffort >= 0) {
+    var traceEffortActif = (etapeTriangle === 'effort_D') ? traceEffortD : (etapeTriangle === 'effort_C') ? traceEffortC : null;
+    if (traceEffortActif) {
+      var wpEf = new THREE.Vector3();
+      controllers[manetteActiveEffort].getWorldPosition(wpEf);
+      var pAncreEf = versAncre(projeterLocal(racine.worldToLocal(wpEf)));
+      majFleche(traceEffortActif.fleche, traceEffortActif.origine, pAncreEf);
     }
   }
 
