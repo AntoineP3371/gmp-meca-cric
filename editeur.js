@@ -1,5 +1,5 @@
 // =====================================================================
-//  Editeur de liaisons - v2.4.0
+//  Editeur de liaisons - v2.5.0
 //  Deux etapes en realite mixte :
 //   1. Coloriage : regrouper par couleur les pieces qui forment un meme
 //      solide (classes d'equivalence cinematique). Corrige par
@@ -976,7 +976,7 @@ function afficherResultatFinal() {
 var MASSE_CHARGE_KG      = 500;
 var G                    = 9.81;
 var ECHELLE_FORCE_M_PAR_N = 0.01 / 200;   // 200 N pour 1 cm
-var TOL_ANGLE_FORCE      = 20;            // degres
+var TOL_ANGLE_FORCE      = 12;            // degres
 var LONGUEUR_MIN_FORCE   = 0.020;         // trace en dessous : trop court, on l'ignore
 
 function pointParLettre(lettre) {
@@ -1063,12 +1063,18 @@ function validerForce() {
   var juste = angle <= TOL_ANGLE_FORCE;
   var presque = !juste && angle <= TOL_ANGLE_FORCE * 2;
 
-  var VERT = '#3ddc84', ORANGE = '#ffb020', ROUGE = '#ff5f5f';
-  var corps = [];
+  // Correct : on affiche directement la solution exacte (le trace de
+  // l'etudiant, lui, reste visible mais estompe) plutot que d'attendre un
+  // clic supplementaire sur VOIR LA SOLUTION - c'est ce vecteur exact qui
+  // doit rester en place pour la suite, pas le trace approximatif.
   if (juste) {
-    traceForce.fleche.userData.mat.color.set(0x3ddc84);
-    corps.push({ texte: 'Direction correcte (ecart ' + Math.round(angle) + '°).', couleur: VERT });
-  } else if (presque) {
+    afficherSolutionForce();
+    return;
+  }
+
+  var ORANGE = '#ffb020', ROUGE = '#ff5f5f';
+  var corps = [];
+  if (presque) {
     traceForce.fleche.userData.mat.color.set(0xffb020);
     corps.push({ texte: 'Presque : ecart de ' + Math.round(angle) + '° avec la verticale.', couleur: ORANGE });
   } else {
@@ -1241,7 +1247,10 @@ function validerDirectionD() {
   var angle = THREE.MathUtils.radToDeg(Math.acos(cos));
 
   if (angle <= TOL_ANGLE_FORCE) {
-    traceD.fleche.userData.mat.color.set(0x3ddc84);
+    // Le trace de l'etudiant reste visible (pour comparaison) mais estompe :
+    // c'est la droite de guidage exacte (BD) qui fait foi pour la suite,
+    // pas son trace approximatif.
+    traceD.fleche.userData.mat.opacity = 0.35;
     guideBD = creerLigneGuide(pB, pD, 0x35c9ff);
     anchor.add(guideBD);
     etapeChape = 'concours';
@@ -1256,6 +1265,10 @@ function validerConcours() {
   if (!pointConcoursTrouve) { majPanneauChape('Vise l\'intersection des deux droites et appuie sur la gachette.'); return; }
   var d = pointConcoursTrouve.distanceTo(pointConcoursVrai);
   if (d <= TOL_DISTANCE_CONCOURS) {
+    // Recale sur la position exacte (pas le clic approximatif de
+    // l'etudiant) : la direction en C, tracee juste apres, doit s'aligner
+    // sur ce point precis, pas sur une approximation.
+    marqueurConcours.position.copy(pointConcoursVrai);
     marqueurConcours.material.color.set(0x3ddc84);
     etapeChape = 'direction_C';
     majPanneauChape('Point de concours correctement identifie.');
@@ -1275,7 +1288,7 @@ function validerDirectionC() {
   var angle = THREE.MathUtils.radToDeg(Math.acos(cos));
 
   if (angle <= TOL_ANGLE_FORCE) {
-    traceC.fleche.userData.mat.color.set(0x3ddc84);
+    traceC.fleche.userData.mat.opacity = 0.35;
     guideCConcours = creerLigneGuide(pC, pointConcoursVrai, 0x35c9ff);
     anchor.add(guideCConcours);
     etapeChape = 'fini';
@@ -1474,6 +1487,15 @@ function validerLignesTriangle() {
   var dC = distancePointDroite(triangleInfo.origineTriangle, ligneC.ancrage, ligneC.direction);
 
   if (dD <= TOL_LIGNE_TRIANGLE && dC <= TOL_LIGNE_TRIANGLE) {
+    // Recale les 2 droites exactement sur les extremites de P (pas la ou
+    // l'etudiant les a laissees) : leur croisement devient alors exactement
+    // triangleInfo.sommet, sans reporter la tolerance de ce placement sur
+    // la suite (marquage du point de resolution, puis traces d'effort).
+    ligneD.ancrage.copy(triangleInfo.pointeP);
+    majLigneDeplacable(ligneD);
+    ligneC.ancrage.copy(triangleInfo.origineTriangle);
+    majLigneDeplacable(ligneC);
+
     ligneD.mesh.userData.mat.color.set(0x3ddc84);
     ligneC.mesh.userData.mat.color.set(0x3ddc84);
     ligneD.poignee.material.color.set(0x3ddc84);
