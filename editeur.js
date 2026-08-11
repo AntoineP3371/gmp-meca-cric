@@ -1161,8 +1161,154 @@ function majPanneauChape(message) {
   if (etapeChape === 'direction_D') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerDirectionD));
   else if (etapeChape === 'concours') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerConcours));
   else if (etapeChape === 'direction_C') boutons2.push(bouton(0, 1, 'VALIDER', '#2f7d4f', validerDirectionC));
+  else if (etapeChape === 'fini') boutons2.push(bouton(0, 1, 'CONTINUER', '#2f7d4f', passerEnTriangle));
 
   dessinerPanneau(titre, corps, boutons2);
+}
+
+// =====================================================================
+//  ETAPE 5 : TRIANGLE DES FORCES
+//
+//  On reprend P (connu), et les directions en D et en C (etablies a
+//  l'etape 4), pour construire le triangle des forces : bout a bout, en
+//  conservant leur orientation. P est fixe. La droite D part de la pointe
+//  de P ; la droite C part de l'origine de P (son "talon"). Chacune ne
+//  peut s'etirer QUE le long de sa direction imposee (projection de la
+//  main sur cette droite au grip) : on ne choisit jamais l'orientation,
+//  seulement la longueur.
+//
+//  Fermeture du triangle = les deux extremites libres se rejoignent. Pas
+//  de longueur "secrete" revelee avant : l'etudiant voit directement s'il
+//  a ferme ou non, comme dans une vraie construction graphique. Une fois
+//  ferme, la longueur (lue via l'echelle 200N/cm) donne les intensites.
+// =====================================================================
+var TOL_FERMETURE_TRIANGLE = 0.012;   // ecart accepte entre les 2 extremites, en m
+
+var triangleInfo = null;   // { origineTriangle, pointeP, dirD, dirC, fermetureVraie, longueurD_vraie, longueurC_vraie, forceD_N, forceC_N }
+var rayD = null, rayC = null;    // { ligne, poignee, origine, direction, longueur }
+var etirement = [null, null];    // par manette : null | 'D' | 'C'
+var flechePTriangle = null;
+
+function calculerTriangle() {
+  var pB = positionMarqueurAncre('B'), pD = positionMarqueurAncre('D'), pC = positionMarqueurAncre('C');
+  var pH = positionMarqueurAncre('H');
+  if (!pB || !pD || !pC || !pH || !pointConcoursVrai) return null;
+
+  var origineTriangle = pH.clone();
+  var dirBasT = directionBasAncre();
+  var poidsN = MASSE_CHARGE_KG * G;
+  var longueurP = poidsN * ECHELLE_FORCE_M_PAR_N;
+  var pointeP = origineTriangle.clone().add(dirBasT.clone().multiplyScalar(longueurP));
+
+  var dirD = pD.clone().sub(pB).normalize();
+  var dirC_ligne = pointConcoursVrai.clone().sub(pC).normalize();
+
+  var fermeture = intersectionDroites(pointeP, dirD, origineTriangle, dirC_ligne);
+  if (!fermeture) return null;
+
+  // Le sens (vers la fermeture) est ce qui compte pour l'etirement, pas le
+  // sens arbitraire de dirD/dirC_ligne calcules ci-dessus.
+  var dirDVraie = fermeture.clone().sub(pointeP).normalize();
+  var dirCVraie = fermeture.clone().sub(origineTriangle).normalize();
+  var longueurD_vraie = pointeP.distanceTo(fermeture);
+  var longueurC_vraie = origineTriangle.distanceTo(fermeture);
+
+  return {
+    origineTriangle: origineTriangle, pointeP: pointeP, poidsN: poidsN,
+    dirD: dirDVraie, dirC: dirCVraie,
+    longueurD_vraie: longueurD_vraie, longueurC_vraie: longueurC_vraie,
+    forceD_N: longueurD_vraie / ECHELLE_FORCE_M_PAR_N,
+    forceC_N: longueurC_vraie / ECHELLE_FORCE_M_PAR_N
+  };
+}
+
+function creerRayon(couleur) {
+  return {
+    ligne: (function () { var l = creerTraitSimple(couleur, RAYON_TRAIT_DIRECTION); anchor.add(l); return l; })(),
+    poignee: (function () {
+      var s = new THREE.Mesh(new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14), new THREE.MeshBasicMaterial({ color: couleur, depthTest: false }));
+      anchor.add(s); return s;
+    })(),
+    longueur: 0
+  };
+}
+
+function majRayon(r, origine, direction) {
+  var bout = origine.clone().add(direction.clone().multiplyScalar(r.longueur));
+  r.poignee.position.copy(bout);
+  majTraitSimple(r.ligne, origine, bout);
+}
+
+function passerEnTriangle() {
+  triangleInfo = calculerTriangle();
+  if (!triangleInfo) { majPanneauChape('Impossible de calculer le triangle (etape 4 incomplete).'); return; }
+
+  etape = 'triangle';
+  panneauPalette.visible = false;
+  panneau.visible = true;
+
+  // On efface les traces de l'etape 4 (droites de direction, point de
+  // concours) : le triangle des forces est un nouveau schema, pas une
+  // suite visuelle de l'isolement.
+  if (traceD) { anchor.remove(traceD.fleche); traceD = null; }
+  if (traceC) { anchor.remove(traceC.fleche); traceC = null; }
+  if (guideBD) { anchor.remove(guideBD); guideBD = null; }
+  if (guideCConcours) { anchor.remove(guideCConcours); guideCConcours = null; }
+  if (marqueurConcours) { anchor.remove(marqueurConcours); marqueurConcours = null; }
+
+  flechePTriangle = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+  anchor.add(flechePTriangle);
+  majFleche(flechePTriangle, triangleInfo.origineTriangle, triangleInfo.pointeP);
+
+  rayD = creerRayon(0xffd400);
+  rayC = creerRayon(0xffd400);
+  majRayon(rayD, triangleInfo.pointeP, triangleInfo.dirD);
+  majRayon(rayC, triangleInfo.origineTriangle, triangleInfo.dirC);
+
+  majPanneauTriangle(null);
+}
+
+function recommencerTriangle() {
+  if (rayD) { rayD.longueur = 0; majRayon(rayD, triangleInfo.pointeP, triangleInfo.dirD); rayD.ligne.userData.mat.color.set(0xffd400); }
+  if (rayC) { rayC.longueur = 0; majRayon(rayC, triangleInfo.origineTriangle, triangleInfo.dirC); rayC.ligne.userData.mat.color.set(0xffd400); }
+  etirement = [null, null];
+  majPanneauTriangle(null);
+}
+
+function validerTriangle() {
+  var boutD = rayD.poignee.position, boutC = rayC.poignee.position;
+  var ecart = boutD.distanceTo(boutC);
+
+  if (ecart <= TOL_FERMETURE_TRIANGLE) {
+    rayD.ligne.userData.mat.color.set(0x3ddc84);
+    rayC.ligne.userData.mat.color.set(0x3ddc84);
+    dessinerPanneau('Étape 5 — Triangle des forces — solution', [
+      { texte: 'Triangle ferme : les 3 forces s\'equilibrent.', couleur: '#3ddc84' },
+      { texte: 'P = ' + Math.round(triangleInfo.poidsN) + ' N', couleur: '#dfeaf5' },
+      { texte: 'Effort en D (bras inferieur) ≈ ' + Math.round(triangleInfo.forceD_N) + ' N', couleur: '#dfeaf5' },
+      { texte: 'Effort en C (bras superieur) ≈ ' + Math.round(triangleInfo.forceC_N) + ' N', couleur: '#dfeaf5' },
+      { texte: 'Echelle : 1 cm = 200 N.', couleur: '#9fd0ff' }
+    ], [
+      bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerTriangle)
+    ]);
+  } else {
+    majPanneauTriangle('Pas encore ferme : ecart d\'environ ' + Math.round(ecart / ECHELLE_FORCE_M_PAR_N) + ' N entre les 2 extremites.');
+  }
+}
+
+function majPanneauTriangle(message) {
+  var corps = [
+    'Construis le triangle des forces : P est deja place. Attrape (grip) l\'extremite jaune de la droite D et etire-la depuis la pointe de P ; fais de meme pour la droite C depuis le talon de P.',
+    'Les deux extremites doivent se rejoindre : c\'est la fermeture du triangle.',
+    '',
+    { texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' }
+  ];
+  if (message) corps.push({ texte: message, couleur: '#ff9f4a' });
+
+  dessinerPanneau('Étape 5 — Triangle des forces', corps, [
+    bouton(0, 0, 'RECOMMENCER', '#7d4f2f', recommencerTriangle),
+    bouton(0, 1, 'VALIDER',     '#2f7d4f', validerTriangle)
+  ]);
 }
 
 // =====================================================================
@@ -1385,7 +1531,17 @@ controllers.forEach(function (ctrl, idx) {
       return;
     }
 
-    // Pas de panneau vise : on attrape le systeme.
+    // Etape 5 : attraper la poignee de la droite D ou C pour l'etirer.
+    if (etape === 'triangle' && rayD && rayC) {
+      var cibleTriangle = [rayD.poignee, rayC.poignee];
+      var hitsTriangle = rayon.intersectObjects(cibleTriangle, false);
+      if (hitsTriangle.length) {
+        etirement[idx] = (hitsTriangle[0].object === rayD.poignee) ? 'D' : 'C';
+        return;
+      }
+    }
+
+    // Pas de panneau ni de poignee visee : on attrape le systeme.
     var autre = 1 - idx;
     if (grabSysteme[autre]) {
       // La 2e main vient de saisir en plus de la 1ere : on bascule en zoom.
@@ -1409,6 +1565,11 @@ controllers.forEach(function (ctrl, idx) {
     if (cible) {
       scene.attach(cible);   // reparente a la scene SANS sauter (garde la position mondiale)
       grabs[idx] = null;
+      return;
+    }
+
+    if (etirement[idx]) {
+      etirement[idx] = null;   // la longueur reste telle quelle, figee au relachement
       return;
     }
 
@@ -1517,6 +1678,22 @@ renderer.setAnimationLoop(function (t, frame) {
       var pAncreCh = versAncre(projeterLocal(racine.worldToLocal(wpCh)));
       majTraitSimple(traceActiveFrame.fleche, traceActiveFrame.origine, pAncreCh);
     }
+  }
+
+  // Etirement des droites du triangle des forces (etape 5) : la main ne
+  // peut deplacer la poignee QUE le long de la direction imposee (on
+  // projette sa position sur cette droite fixe, jamais de rotation libre).
+  for (var kt = 0; kt < 2; kt++) {
+    if (!etirement[kt] || !triangleInfo) continue;
+    var wpT = new THREE.Vector3();
+    controllers[kt].getWorldPosition(wpT);
+    var pAncreT = versAncre(projeterLocal(racine.worldToLocal(wpT)));
+    var r = (etirement[kt] === 'D') ? rayD : rayC;
+    var origineR = (etirement[kt] === 'D') ? triangleInfo.pointeP : triangleInfo.origineTriangle;
+    var dirR = (etirement[kt] === 'D') ? triangleInfo.dirD : triangleInfo.dirC;
+    var t = Math.max(0, pAncreT.clone().sub(origineR).dot(dirR));
+    r.longueur = t;
+    majRayon(r, origineR, dirR);
   }
 
   // Le groupe de panneaux ne suit JAMAIS le systeme : sa position ne
