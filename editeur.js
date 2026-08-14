@@ -1,13 +1,18 @@
 // =====================================================================
-//  Editeur de liaisons - v4.0.0
-//  Deux etapes en realite mixte :
-//   1. Coloriage : regrouper par couleur les pieces qui forment un meme
-//      solide (classes d'equivalence cinematique). Corrige par
-//      equivalence (peu importe la couleur exacte, seul le regroupement
-//      compte) a partir de classes.json.
-//   2. Liaisons : viser le centre de chaque liaison pivot et le poser
-//      d'une pression de gachette. Enregistre dans points-liaisons.json
-//      (via le serveur local) pour etre relu ensuite.
+//  Editeur de liaisons - v5.0.0
+//  Exercice complet de statique graphique sur le cric rouleur, en
+//  realite mixte (Meta Quest 3) :
+//   1. Coloriage des classes d'equivalence cinematique (corrige par
+//      classes.json).
+//   2. Placement des liaisons (points A a H).
+//   3. Isolement de la chape (poids, directions, triangle des forces).
+//   4. Isolement du bras superieur (meme methode).
+//   5. Bilan anime + evaluation de competence (3 competences, niveau
+//      base sur les reussites/essais/questions sautees, sans note
+//      chiffree).
+//  Chaque question suit le meme schema de boutons : < PRECEDENT,
+//  VALIDER, RECOMMENCER, SAUTER LA QUESTION (sauf etape 2, qui n'a pas
+//  de bonne/mauvaise reponse a verifier).
 // =====================================================================
 
 window.addEventListener('load', function () {
@@ -878,6 +883,11 @@ function evaluerColoriage() {
 
 var EYEBROW_COLORIAGE = 'Étape 1 — Recherche des classes d’équivalence';
 
+// Sauter la question fait passer par le meme ecran "juste" que reussir
+// vraiment (le coloriage est corrige avant l'appel) : ce drapeau permet
+// de quand meme noter 'saute' plutot que 'parfait' cote competence.
+var coloriageFutSaute = false;
+
 function validerColoriage() {
   var r = evaluerColoriage();
   var juste = r.ok === r.total;
@@ -885,6 +895,13 @@ function validerColoriage() {
     { texte: r.ok + ' / ' + r.total + ' solides correctement regroupes.', couleur: juste ? '#3ddc84' : '#ffb020' }
   ];
   r.problemes.slice(0, 4).forEach(function (p) { corps.push({ texte: '• ' + p, couleur: '#ff9f4a' }); });
+
+  if (juste) {
+    noterResultat('coloriage', coloriageFutSaute ? 'saute' : undefined);
+  } else {
+    noterEchec('coloriage');
+  }
+  coloriageFutSaute = false;
 
   dessinerPanneau({
     eyebrow: EYEBROW_COLORIAGE,
@@ -897,10 +914,32 @@ function validerColoriage() {
       bouton(0, 0, 'RECOLORIER', '#3a5f8a', function () { majPanneauColoriage(null); }),
       bouton(0, 1, 'CONTINUER',  '#2f7d4f', passerEnPlacement)
     ] : [
-      bouton(0, 0, 'CORRIGER',             '#3a5f8a', function () { majPanneauColoriage(null); }),
-      bouton(0, 1, 'CONTINUER MALGRE TOUT','#7d4f2f', passerEnPlacement)
+      bouton(0, 0, 'RÉESSAYER',       '#2f7d4f', function () { majPanneauColoriage(null); }),
+      bouton(0, 1, 'VOIR LE CORRIGÉ', '#3a5f8a', function () { noterResultat('coloriage', 'aide'); appliquerCorrigeColoriage(); passerEnPlacement(); })
     ]
   });
+}
+
+// Applique directement le bon regroupement (une couleur par classe
+// d'equivalence) : utilise pour "sauter" la question (voir sauterColoriage)
+// et pour VOIR LE CORRIGÉ depuis l'ecran de reponse fausse.
+function appliquerCorrigeColoriage() {
+  var classeAttendue = mappeClasseAttendue();
+  var couleurParClasse = {};
+  classesDef.classes.forEach(function (c, i) { couleurParClasse[c.id] = PALETTE[i % PALETTE.length].hex; });
+  piecesModele.forEach(function (p) {
+    var cid = classeAttendue[p.nomBase];
+    if (!cid) return;
+    p.couleur = couleurParClasse[cid];
+    p.meshes.forEach(function (m) { m.material.color.setHex(p.couleur); });
+  });
+  majProjectionEtFilaire();
+}
+
+function sauterColoriage() {
+  coloriageFutSaute = true;
+  appliquerCorrigeColoriage();
+  validerColoriage();
 }
 
 function afficherAideColoriage() {
@@ -930,7 +969,8 @@ function majPanneauColoriage(message) {
     boutons: [
       bouton(0, 0, 'VALIDER',      '#2f7d4f', validerColoriage),
       bouton(0, 1, 'TOUT EFFACER', '#7d4f2f', effacerColoriageTout),
-      bouton(0, 2, 'ANNULER',      '#3a5f8a', annulerDerniere)
+      bouton(1, 0, 'ANNULER',      '#3a5f8a', annulerDerniere),
+      bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', sauterColoriage)
     ]
   });
 }
@@ -1026,42 +1066,14 @@ function allerA(i) {
 function precedent() { allerA(courant - 1); }
 function suivant()   { allerA(courant + 1); }
 
-function supprimerCourant() {
-  var i = courant;
-  var ancienPos = points[i].pos;
-  if (!ancienPos) { majPanneau('Ce point n\'est pas encore place.'); return; }
-  var ancienMesh = points[i].meshProche;
-  pousserAnnulation(function () {
-    points[i].pos = ancienPos;
-    points[i].meshProche = ancienMesh;
-    majMarqueur(i);
-    allerA(i);
-  });
-  points[courant].pos = null;
-  points[courant].meshProche = null;
-  majMarqueur(courant);
-  majPanneau('Point efface. Vise et appuie pour le replacer.');
-}
-
-function ajouterPoint() {
-  var n = points.length + 1;
-  // cotes: [] -> ce point supplementaire n'est rattache a aucun solide
-  // connu, il n'apparaitra donc pas dans la structure filaire (normal :
-  // classes.json ne le connait pas).
-  var nouveauPoint = { nom: '+' + n, lettre: '+' + n, cotes: [], pos: null, meshProche: null };
-  var ancienCourant = courant;
-  points.push(nouveauPoint);
-  marqueurs.push(null);
-  pousserAnnulation(function () {
-    if (points[points.length - 1] !== nouveauPoint) return;   // deja modifie depuis : on n'annule pas a l'aveugle
-    points.pop();
-    var m = marqueurs.pop();
-    if (m) { scene.remove(m.sphere); scene.remove(m.etiquette); }
-    allerA(Math.min(ancienCourant, points.length - 1));
-    majProjectionEtFilaire();
-  });
-  allerA(points.length - 1);
-  majPanneau('Nouveau point ajoute. Vise sa position et appuie sur la gachette.');
+// Valide le point courant (pas de bonne/mauvaise reponse a verifier : la
+// position choisie fait foi). Avance au prochain point non place, ou
+// termine l'etape (enregistrement + passage a l'etape 3) si c'etait le
+// dernier.
+function validerPoint() {
+  if (!points[courant].pos) { majPanneau('Vise et pose ce point avant de valider.'); return; }
+  if (nbPlaces() >= points.length) { enregistrer(); return; }
+  allerA(pointSuivantNonPlace(courant));
 }
 
 // =====================================================================
@@ -1324,6 +1336,7 @@ function afficherAideForces() {
 
 function majPanneauForces(message) {
   var corps = [
+    { texte: 'Il faut maintenant placer l\'effort connu, le poids de la charge. Vous le dessinerez par un vecteur. Vise le point d\'application, clic long et deplace le vecteur dans le sens voulu. Relache la gachette pour poser le vecteur.' },
     { texte: (traceForce && traceForce.direction) ? 'Vecteur trace.' : 'Pas encore trace.', couleur: '#9fd0ff' },
     { texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' }
   ];
@@ -1337,7 +1350,8 @@ function majPanneauForces(message) {
     aide: afficherAideForces,
     boutons: [
       bouton(0, 0, 'VALIDER',     '#2f7d4f', validerForce),
-      bouton(0, 1, 'RECOMMENCER', '#7d4f2f', recommencerForce)
+      bouton(0, 1, 'RECOMMENCER', '#7d4f2f', recommencerForce),
+      bouton(1, 0, 'SAUTER LA QUESTION', '#4a4a4a', afficherSolutionForce)
     ],
     curseurs: curseursEpaisseurStandard()
   });
@@ -1460,14 +1474,15 @@ function precedentChape() {
 // Ecran de reponse generique pour une validation d'angle/distance ratee :
 // propose de reessayer, ou de voir directement le corrige (qui execute la
 // suite "reussite" et avance) plutot que de rester bloque.
-function afficherReponseEchecChape(titreSousEtape, detail, actionReessayer, actionVoirCorrige) {
+function afficherReponseEchecChape(id, titreSousEtape, detail, actionReessayer, actionVoirCorrige) {
+  noterEchec(id);
   dessinerPanneau({
     eyebrow: EYEBROW_CHAPE,
     titre: 'Réponse — ' + titreSousEtape,
     statut: { ok: false, titre: 'Pas encore juste', detail: detail },
     boutons: [
       bouton(0, 0, 'RÉESSAYER',       '#2f7d4f', actionReessayer),
-      bouton(0, 1, 'VOIR LE CORRIGÉ', '#3a5f8a', actionVoirCorrige),
+      bouton(0, 1, 'VOIR LE CORRIGÉ', '#3a5f8a', function () { noterResultat(id, 'aide'); actionVoirCorrige(); }),
       bouton(0, 2, '< PRÉCÉDENT',     '#4a4a4a', precedentChape)
     ],
     curseurs: curseursEpaisseurStandard()
@@ -1489,13 +1504,22 @@ function validerDirectionD() {
   var cos = Math.abs(THREE.MathUtils.clamp(traceD.direction.dot(attendue), -1, 1));
   var angle = THREE.MathUtils.radToDeg(Math.acos(cos));
 
-  if (angle <= TOL_ANGLE_FORCE) { reussirDirectionD(); return; }
+  if (angle <= TOL_ANGLE_FORCE) { noterResultat('direction_D'); reussirDirectionD(); return; }
   traceD.fleche.userData.mat.color.set(0xff5f5f);
-  afficherReponseEchecChape('Direction de l’effort en D', 'Écart de ' + Math.round(angle) + '° avec la droite (B, D)',
+  afficherReponseEchecChape('direction_D', 'Direction de l’effort en D', 'Écart de ' + Math.round(angle) + '° avec la droite (B, D)',
     function () { majPanneauChape(null); }, reussirDirectionD);
 }
 
 function reussirConcours() {
+  if (!marqueurConcours) {
+    marqueurConcours = new THREE.Mesh(
+      new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
+      new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
+    );
+    marqueurConcours.scale.setScalar(facteurPoint);
+    anchor.add(marqueurConcours);
+  }
+  pointConcoursTrouve = pointConcoursVrai.clone();
   marqueurConcours.position.copy(pointConcoursVrai);
   marqueurConcours.material.color.set(0x3ddc84);
   etapeChape = 'direction_C';
@@ -1504,21 +1528,12 @@ function reussirConcours() {
 function validerConcours() {
   if (!pointConcoursTrouve) { majPanneauChape('Vise l\'intersection des deux droites et appuie sur la gachette.'); return; }
   var d = pointConcoursTrouve.distanceTo(pointConcoursVrai);
-  if (d <= TOL_DISTANCE_CONCOURS) { reussirConcours(); return; }
+  if (d <= TOL_DISTANCE_CONCOURS) { noterResultat('concours_chape'); reussirConcours(); return; }
   anchor.remove(marqueurConcours);
   marqueurConcours = null;
   pointConcoursTrouve = null;
-  afficherReponseEchecChape('Point de concours', 'Écart de ' + Math.round(d * 100) + ' cm avec le croisement exact',
-    function () { majPanneauChape(null); }, function () {
-      pointConcoursTrouve = pointConcoursVrai.clone();
-      marqueurConcours = new THREE.Mesh(
-        new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
-        new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
-      );
-      marqueurConcours.scale.setScalar(facteurPoint);
-      anchor.add(marqueurConcours);
-      reussirConcours();
-    });
+  afficherReponseEchecChape('concours_chape', 'Point de concours', 'Écart de ' + Math.round(d * 100) + ' cm avec le croisement exact',
+    function () { majPanneauChape(null); }, reussirConcours);
 }
 
 function reussirDirectionC() {
@@ -1535,9 +1550,9 @@ function validerDirectionC() {
   var cos = Math.abs(THREE.MathUtils.clamp(traceC.direction.dot(attendue), -1, 1));
   var angle = THREE.MathUtils.radToDeg(Math.acos(cos));
 
-  if (angle <= TOL_ANGLE_FORCE) { reussirDirectionC(); return; }
+  if (angle <= TOL_ANGLE_FORCE) { noterResultat('direction_C'); reussirDirectionC(); return; }
   traceC.fleche.userData.mat.color.set(0xff5f5f);
-  afficherReponseEchecChape('Direction de l’effort en C', 'Écart de ' + Math.round(angle) + '° avec la droite (C, concours)',
+  afficherReponseEchecChape('direction_C', 'Direction de l’effort en C', 'Écart de ' + Math.round(angle) + '° avec la droite (C, concours)',
     function () { majPanneauChape(null); }, reussirDirectionC);
 }
 
@@ -1581,11 +1596,11 @@ var PROGRESSION_SOUS_CHAPE = { direction_D: '2 / 5', concours: '3 / 5', directio
 function majPanneauChape(message) {
   var corps = [];
   if (etapeChape === 'direction_D') {
-    corps.push('Trace la direction de l\'effort en D, en t\'alignant sur les points B et D.');
+    corps.push('Pour etablir graphiquement l\'isolement de la chape, nous remarquons qu\'elle est soumise a 3 forces. Vous etablirez donc un triangle des forces. Pour ce faire, il faut identifier la direction de l\'effort en D. Vise le point d\'application, clic long et deplace la droite dans la direction voulue. Relache la gachette pour poser la droite.');
   } else if (etapeChape === 'concours') {
-    corps.push('Vise l\'intersection de la droite (BD) et de la verticale du poids (par H), gachette pour la marquer.');
+    corps.push('Il faut maintenant determiner la direction de l\'effort en C. Les directions des trois forces doivent etre concourantes en un point. Vise ce point et clic avec la gachette pour le placer.');
   } else if (etapeChape === 'direction_C') {
-    corps.push('Trace la direction de l\'effort en C, en t\'alignant sur C et le point de concours identifie.');
+    corps.push('Il faut maintenant tracer la direction de l\'effort en C. Clic long en C puis deplace la droite dans la direction voulue. Relache la gachette pour poser la droite.');
   } else {
     corps.push({ texte: 'Les 3 directions (P, D, C) sont determinees.', couleur: '#3ddc84' });
   }
@@ -1594,10 +1609,16 @@ function majPanneauChape(message) {
   var boutons2 = [];
   if (etapeChape !== 'fini') boutons2.push(bouton(0, 0, '< PRÉCÉDENT', '#3a5f8a', precedentChape));
   boutons2.push(bouton(0, 1, 'RECOMMENCER', '#7d4f2f', recommencerChape));
-  if (etapeChape === 'direction_D') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerDirectionD));
-  else if (etapeChape === 'concours') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerConcours));
-  else if (etapeChape === 'direction_C') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerDirectionC));
-  else boutons2.push(bouton(0, 0, 'CONTINUER', '#2f7d4f', passerEnTriangle));
+  if (etapeChape === 'direction_D') {
+    boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerDirectionD));
+    boutons2.push(bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', function () { noterResultat('direction_D', 'saute'); reussirDirectionD(); }));
+  } else if (etapeChape === 'concours') {
+    boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerConcours));
+    boutons2.push(bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', function () { noterResultat('concours_chape', 'saute'); reussirConcours(); }));
+  } else if (etapeChape === 'direction_C') {
+    boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerDirectionC));
+    boutons2.push(bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', function () { noterResultat('direction_C', 'saute'); reussirDirectionC(); }));
+  } else boutons2.push(bouton(0, 0, 'CONTINUER', '#2f7d4f', passerEnTriangle));
 
   dessinerPanneau({
     eyebrow: EYEBROW_CHAPE,
@@ -1631,7 +1652,6 @@ function majPanneauChape(message) {
 //      soi-meme, juste a identifier le bon segment.
 // =====================================================================
 var TOL_LIGNE_TRIANGLE   = 0.020;   // ecart accepte droite/extremite de P, en m
-var TOL_CONCOURS_TRIANGLE = 0.020;  // ecart accepte pour le point de resolution, en m
 var TOL_EFFORT_TRIANGLE  = 0.025;   // ecart accepte pour l'extremite d'un trace d'effort, en m
 var LONGUEUR_LIGNE_TRIANGLE = 0.30; // demi-longueur affichee des droites deplacables
 
@@ -1642,8 +1662,7 @@ var flechePTriangle = null;
 var ligneD = null, ligneC = null;   // { mesh, poignee, ancrage: Vector3, direction: Vector3 }
 var glissement = [null, null];      // par manette : null | 'D' | 'C'
 
-var marqueurSommet = null;   // point de resolution, une fois marque
-var sommetTrouve   = null;   // Vector3 (ancre) propose par l'etudiant, avant validation
+var marqueurSommet = null;   // point de resolution (place automatiquement)
 
 var traceEffortD = null, traceEffortC = null;   // { fleche, origine, direction, arrivee }
 var manetteActiveEffort = -1;
@@ -1726,7 +1745,6 @@ function reinitialiserObjetsTriangle() {
   if (traceEffortC) { anchor.remove(traceEffortC.fleche); traceEffortC = null; }
   if (flecheCorrigeD) { anchor.remove(flecheCorrigeD); flecheCorrigeD = null; }
   if (flecheCorrigeC) { anchor.remove(flecheCorrigeC); flecheCorrigeC = null; }
-  sommetTrouve = null;
   glissement = [null, null];
   manetteActiveEffort = -1;
 
@@ -1768,7 +1786,7 @@ function recommencerTriangle() {
   majPanneauTriangle(null);
 }
 
-var SEQUENCE_TRIANGLE = ['placer_droites', 'concours', 'effort_D', 'effort_C', 'fini'];
+var SEQUENCE_TRIANGLE = ['placer_droites', 'effort_D', 'effort_C', 'fini'];
 function precedentTriangle() {
   var i = SEQUENCE_TRIANGLE.indexOf(etapeTriangle);
   if (i > 0) { etapeTriangle = SEQUENCE_TRIANGLE[i - 1]; majPanneauTriangle(null); return; }
@@ -1777,14 +1795,15 @@ function precedentTriangle() {
   majPanneauChape(null);
 }
 
-function afficherReponseEchecTriangle(titreSousEtape, detail, actionReessayer, actionVoirCorrige) {
+function afficherReponseEchecTriangle(id, titreSousEtape, detail, actionReessayer, actionVoirCorrige) {
+  noterEchec(id);
   dessinerPanneau({
     eyebrow: EYEBROW_CHAPE,
     titre: 'Réponse — ' + titreSousEtape,
     statut: { ok: false, titre: 'Pas encore juste', detail: detail },
     boutons: [
       bouton(0, 0, 'RÉESSAYER',       '#2f7d4f', actionReessayer),
-      bouton(0, 1, 'VOIR LE CORRIGÉ', '#3a5f8a', actionVoirCorrige),
+      bouton(0, 1, 'VOIR LE CORRIGÉ', '#3a5f8a', function () { noterResultat(id, 'aide'); actionVoirCorrige(); }),
       bouton(0, 2, '< PRÉCÉDENT',     '#4a4a4a', precedentTriangle)
     ],
     curseurs: curseursEpaisseurStandard()
@@ -1800,46 +1819,44 @@ function reussirLignesTriangle() {
   ligneC.mesh.userData.mat.color.set(0x3ddc84);
   ligneD.poignee.material.color.set(0x3ddc84);
   ligneC.poignee.material.color.set(0x3ddc84);
-  etapeTriangle = 'concours';
+
+  // Le point de resolution (croisement des 2 droites) est desormais place
+  // automatiquement, sans etape de pointage manuel (sur demande de
+  // l'utilisateur) : sa position est deja connue exactement (triangleInfo.sommet).
+  if (marqueurSommet) { anchor.remove(marqueurSommet); }
+  marqueurSommet = new THREE.Mesh(
+    new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
+    new THREE.MeshBasicMaterial({ color: 0x3ddc84, depthTest: false })
+  );
+  marqueurSommet.position.copy(triangleInfo.sommet);
+  marqueurSommet.scale.setScalar(facteurPoint);
+  anchor.add(marqueurSommet);
+
+  etapeTriangle = 'effort_D';
   majPanneauTriangle(null);
 }
 function validerLignesTriangle() {
   var dD = distancePointDroite(triangleInfo.pointeP, ligneD.ancrage, ligneD.direction);
   var dC = distancePointDroite(triangleInfo.origineTriangle, ligneC.ancrage, ligneC.direction);
-  if (dD <= TOL_LIGNE_TRIANGLE && dC <= TOL_LIGNE_TRIANGLE) { reussirLignesTriangle(); return; }
+  if (dD <= TOL_LIGNE_TRIANGLE && dC <= TOL_LIGNE_TRIANGLE) { noterResultat('triangle_chape_droites'); reussirLignesTriangle(); return; }
   var probleme = (dD > TOL_LIGNE_TRIANGLE && dC > TOL_LIGNE_TRIANGLE) ? 'Les deux droites ne passent pas encore par les extremites de P'
     : (dD > TOL_LIGNE_TRIANGLE) ? 'La droite D ne passe pas encore par la pointe de P'
     : 'La droite C ne passe pas encore par le talon de P';
-  afficherReponseEchecTriangle('Placement des droites', probleme, function () { majPanneauTriangle(null); }, reussirLignesTriangle);
+  afficherReponseEchecTriangle('triangle_chape_droites', 'Placement des droites', probleme, function () { majPanneauTriangle(null); }, reussirLignesTriangle);
 }
 
-function reussirConcoursTriangle() {
-  marqueurSommet.position.copy(triangleInfo.sommet);
-  marqueurSommet.material.color.set(0x3ddc84);
-  etapeTriangle = 'effort_D';
-  majPanneauTriangle(null);
-}
-function validerConcoursTriangle() {
-  if (!sommetTrouve) { majPanneauTriangle('Vise le croisement des deux droites et appuie sur la gachette.'); return; }
-  var d = sommetTrouve.distanceTo(triangleInfo.sommet);
-  if (d <= TOL_CONCOURS_TRIANGLE) { reussirConcoursTriangle(); return; }
-  anchor.remove(marqueurSommet);
-  marqueurSommet = null;
-  sommetTrouve = null;
-  afficherReponseEchecTriangle('Point de résolution', 'Écart de ' + Math.round(d * 100) + ' cm avec le croisement exact',
-    function () { majPanneauTriangle(null); }, function () {
-      sommetTrouve = triangleInfo.sommet.clone();
-      marqueurSommet = new THREE.Mesh(
-        new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
-        new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
-      );
-      marqueurSommet.scale.setScalar(facteurPoint);
-      anchor.add(marqueurSommet);
-      reussirConcoursTriangle();
-    });
-}
-
+// Cree/complete traceEffortD si besoin (ex: SAUTER LA QUESTION sans essai
+// prealable, ou l'etudiant n'a jamais grippe la gachette) : sans ca la
+// suite (couleur, majPanneauTriangle) crasherait sur un objet inexistant.
 function reussirEffortD() {
+  if (!traceEffortD) {
+    var fED = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+    anchor.add(fED);
+    traceEffortD = { fleche: fED, origine: triangleInfo.pointeP.clone(), direction: null, arrivee: null };
+  }
+  majFleche(traceEffortD.fleche, traceEffortD.origine, triangleInfo.sommet);
+  traceEffortD.arrivee = triangleInfo.sommet.clone();
+  traceEffortD.direction = triangleInfo.sommet.clone().sub(traceEffortD.origine).normalize();
   traceEffortD.fleche.userData.mat.color.set(0x3ddc84);
   etapeTriangle = 'effort_C';
   majPanneauTriangle(null);
@@ -1847,18 +1864,21 @@ function reussirEffortD() {
 function validerEffortD() {
   if (!traceEffortD || !traceEffortD.direction) { majPanneauTriangle('Trace d\'abord l\'effort en D : gachette depuis la pointe de P, jusqu\'au point de resolution.'); return; }
   var d = traceEffortD.arrivee.distanceTo(triangleInfo.sommet);
-  if (d <= TOL_EFFORT_TRIANGLE) { reussirEffortD(); return; }
+  if (d <= TOL_EFFORT_TRIANGLE) { noterResultat('triangle_chape_effort_D'); reussirEffortD(); return; }
   traceEffortD.fleche.userData.mat.color.set(0xff5f5f);
-  afficherReponseEchecTriangle('Effort en D', 'Écart de ' + Math.round(d * 100) + ' cm avec le point de resolution',
-    function () { majPanneauTriangle(null); }, function () {
-      majFleche(traceEffortD.fleche, traceEffortD.origine, triangleInfo.sommet);
-      traceEffortD.arrivee = triangleInfo.sommet.clone();
-      traceEffortD.direction = triangleInfo.sommet.clone().sub(traceEffortD.origine).normalize();
-      reussirEffortD();
-    });
+  afficherReponseEchecTriangle('triangle_chape_effort_D', 'Effort en D', 'Écart de ' + Math.round(d * 100) + ' cm avec le point de resolution',
+    function () { majPanneauTriangle(null); }, reussirEffortD);
 }
 
 function reussirEffortC() {
+  if (!traceEffortC) {
+    var fEC = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+    anchor.add(fEC);
+    traceEffortC = { fleche: fEC, origine: triangleInfo.sommet.clone(), direction: null, arrivee: null };
+  }
+  majFleche(traceEffortC.fleche, traceEffortC.origine, triangleInfo.origineTriangle);
+  traceEffortC.arrivee = triangleInfo.origineTriangle.clone();
+  traceEffortC.direction = triangleInfo.origineTriangle.clone().sub(traceEffortC.origine).normalize();
   traceEffortC.fleche.userData.mat.color.set(0x3ddc84);
   etapeTriangle = 'fini';
   afficherResultatTriangle();
@@ -1866,15 +1886,10 @@ function reussirEffortC() {
 function validerEffortC() {
   if (!traceEffortC || !traceEffortC.direction) { majPanneauTriangle('Trace d\'abord l\'effort en C : gachette depuis le point de resolution, jusqu\'au talon de P.'); return; }
   var d = traceEffortC.arrivee.distanceTo(triangleInfo.origineTriangle);
-  if (d <= TOL_EFFORT_TRIANGLE) { reussirEffortC(); return; }
+  if (d <= TOL_EFFORT_TRIANGLE) { noterResultat('triangle_chape_effort_C'); reussirEffortC(); return; }
   traceEffortC.fleche.userData.mat.color.set(0xff5f5f);
-  afficherReponseEchecTriangle('Effort en C', 'Écart de ' + Math.round(d * 100) + ' cm avec le talon de P',
-    function () { majPanneauTriangle(null); }, function () {
-      majFleche(traceEffortC.fleche, traceEffortC.origine, triangleInfo.origineTriangle);
-      traceEffortC.arrivee = triangleInfo.origineTriangle.clone();
-      traceEffortC.direction = triangleInfo.origineTriangle.clone().sub(traceEffortC.origine).normalize();
-      reussirEffortC();
-    });
+  afficherReponseEchecTriangle('triangle_chape_effort_C', 'Effort en C', 'Écart de ' + Math.round(d * 100) + ' cm avec le talon de P',
+    function () { majPanneauTriangle(null); }, reussirEffortC);
 }
 
 function afficherAideTriangle() {
@@ -1885,17 +1900,11 @@ function afficherAideTriangle() {
       '',
       { texte: 'Attrape (grip) chaque droite jaune par sa poignee et fais-la glisser, sans la faire pivoter, jusqu\'a une extremite de P : la droite D par la pointe, la droite C par le talon.', couleur: '#9fd0ff' }
     ];
-  } else if (etapeTriangle === 'concours') {
-    corps = [
-      'Une fois les 2 droites bien placees, elles se croisent quelque part : c\'est le "point de resolution" du triangle des forces.',
-      '',
-      { texte: 'Vise ce croisement avec le rayon bleu et appuie sur la gachette pour le marquer.', couleur: '#9fd0ff' }
-    ];
   } else if (etapeTriangle === 'effort_D') {
     corps = [
-      'Le point de resolution est fixe : le bon trace donne directement la bonne longueur, pas besoin de "fermer" quoi que ce soit toi-meme.',
+      'Le point de resolution (croisement des 2 droites) est deja marque : le bon trace donne directement la bonne longueur, pas besoin de "fermer" quoi que ce soit toi-meme.',
       '',
-      { texte: 'Gachette maintenue depuis la pointe de P, tire jusqu\'au point de resolution, relache. Le sens compte : de P vers le point.', couleur: '#9fd0ff' }
+      { texte: 'Vise le point origine du vecteur dans le triangle, clic long et deplace le vecteur dans le sens voulu. Relache la gachette pour poser le vecteur.', couleur: '#9fd0ff' }
     ];
   } else {
     corps = [
@@ -1948,24 +1957,37 @@ function afficherResultatTriangle() {
 
 var TITRES_SOUS_TRIANGLE = {
   placer_droites: 'Triangle des forces — placement des droites',
-  concours:       'Triangle des forces — point de résolution',
   effort_D:       'Triangle des forces — effort en D',
   effort_C:       'Triangle des forces — effort en C'
 };
-var PROGRESSION_SOUS_TRIANGLE = { placer_droites: '5 / 5', concours: '5 / 5', effort_D: '5 / 5', effort_C: '5 / 5' };
+var PROGRESSION_SOUS_TRIANGLE = { placer_droites: '5 / 5', effort_D: '5 / 5', effort_C: '5 / 5' };
 
 function majPanneauTriangle(message) {
-  var corps = [{ texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' }];
+  var corps = [];
+  if (etapeTriangle === 'placer_droites') {
+    corps.push('Il faut maintenant construire le triangle des forces a partir du vecteur force connu et des deux droites determinees precedemment. Clic long sur la manette des droites et deplace-les pour former ce triangle autour du vecteur force (qui reste immobile).');
+  } else if (etapeTriangle === 'effort_D') {
+    corps.push('Il faut identifier l\'effort en D dans le triangle. Vise le point origine du vecteur dans le triangle, clic long et deplace le vecteur dans le sens voulu. Relache la gachette pour poser le vecteur.');
+  } else if (etapeTriangle === 'effort_C') {
+    corps.push('Il faut identifier l\'effort en C dans le triangle. Vise le point origine du vecteur dans le triangle, clic long et deplace le vecteur dans le sens voulu. Relache la gachette pour poser le vecteur.');
+  }
+  corps.push({ texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' });
   if (message) corps.push('', { texte: message, couleur: '#ff9f4a' });
 
   var boutons2 = [
     bouton(0, 0, '< PRÉCÉDENT', '#3a5f8a', precedentTriangle),
     bouton(0, 1, 'RECOMMENCER', '#7d4f2f', recommencerTriangle)
   ];
-  if (etapeTriangle === 'placer_droites') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerLignesTriangle));
-  else if (etapeTriangle === 'concours') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerConcoursTriangle));
-  else if (etapeTriangle === 'effort_D') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerEffortD));
-  else if (etapeTriangle === 'effort_C') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerEffortC));
+  if (etapeTriangle === 'placer_droites') {
+    boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerLignesTriangle));
+    boutons2.push(bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', function () { noterResultat('triangle_chape_droites', 'saute'); reussirLignesTriangle(); }));
+  } else if (etapeTriangle === 'effort_D') {
+    boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerEffortD));
+    boutons2.push(bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', function () { noterResultat('triangle_chape_effort_D', 'saute'); reussirEffortD(); }));
+  } else if (etapeTriangle === 'effort_C') {
+    boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerEffortC));
+    boutons2.push(bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', function () { noterResultat('triangle_chape_effort_C', 'saute'); reussirEffortC(); }));
+  }
 
   dessinerPanneau({
     eyebrow: EYEBROW_CHAPE,
@@ -2074,14 +2096,15 @@ function precedentBrasSup() {
   majPanneauTriangle(null);
 }
 
-function afficherReponseEchecBrasSup(titreSousEtape, detail, actionReessayer, actionVoirCorrige) {
+function afficherReponseEchecBrasSup(id, titreSousEtape, detail, actionReessayer, actionVoirCorrige) {
+  noterEchec(id);
   dessinerPanneau({
     eyebrow: EYEBROW_BRASSUP,
     titre: 'Réponse — ' + titreSousEtape,
     statut: { ok: false, titre: 'Pas encore juste', detail: detail },
     boutons: [
       bouton(0, 0, 'RÉESSAYER',       '#2f7d4f', actionReessayer),
-      bouton(0, 1, 'VOIR LE CORRIGÉ', '#3a5f8a', actionVoirCorrige),
+      bouton(0, 1, 'VOIR LE CORRIGÉ', '#3a5f8a', function () { noterResultat(id, 'aide'); actionVoirCorrige(); }),
       bouton(0, 2, '< PRÉCÉDENT',     '#4a4a4a', precedentBrasSup)
     ],
     curseurs: curseursEpaisseurStandard()
@@ -2102,13 +2125,22 @@ function validerDirectionG() {
   var cos = Math.abs(THREE.MathUtils.clamp(traceG.direction.dot(attendue), -1, 1));
   var angle = THREE.MathUtils.radToDeg(Math.acos(cos));
 
-  if (angle <= TOL_ANGLE_FORCE) { reussirDirectionG(); return; }
+  if (angle <= TOL_ANGLE_FORCE) { noterResultat('direction_G'); reussirDirectionG(); return; }
   traceG.fleche.userData.mat.color.set(0xff5f5f);
-  afficherReponseEchecBrasSup('Direction de l’effort en G', 'Écart de ' + Math.round(angle) + '° avec la droite (F, G)',
+  afficherReponseEchecBrasSup('direction_G', 'Direction de l’effort en G', 'Écart de ' + Math.round(angle) + '° avec la droite (F, G)',
     function () { majPanneauBrasSup(null); }, reussirDirectionG);
 }
 
 function reussirConcoursBrasSup() {
+  if (!marqueurConcoursBrasSup) {
+    marqueurConcoursBrasSup = new THREE.Mesh(
+      new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
+      new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
+    );
+    marqueurConcoursBrasSup.scale.setScalar(facteurPoint);
+    anchor.add(marqueurConcoursBrasSup);
+  }
+  pointConcoursTrouveBrasSup = pointConcoursVraiBrasSup.clone();
   marqueurConcoursBrasSup.position.copy(pointConcoursVraiBrasSup);
   marqueurConcoursBrasSup.material.color.set(0x3ddc84);
   etapeBrasSup = 'direction_A';
@@ -2117,21 +2149,12 @@ function reussirConcoursBrasSup() {
 function validerConcoursBrasSup() {
   if (!pointConcoursTrouveBrasSup) { majPanneauBrasSup('Vise l\'intersection des deux droites et appuie sur la gachette.'); return; }
   var d = pointConcoursTrouveBrasSup.distanceTo(pointConcoursVraiBrasSup);
-  if (d <= TOL_DISTANCE_CONCOURS) { reussirConcoursBrasSup(); return; }
+  if (d <= TOL_DISTANCE_CONCOURS) { noterResultat('concours_brasSup'); reussirConcoursBrasSup(); return; }
   anchor.remove(marqueurConcoursBrasSup);
   marqueurConcoursBrasSup = null;
   pointConcoursTrouveBrasSup = null;
-  afficherReponseEchecBrasSup('Point de concours', 'Écart de ' + Math.round(d * 100) + ' cm avec le croisement exact',
-    function () { majPanneauBrasSup(null); }, function () {
-      pointConcoursTrouveBrasSup = pointConcoursVraiBrasSup.clone();
-      marqueurConcoursBrasSup = new THREE.Mesh(
-        new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
-        new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
-      );
-      marqueurConcoursBrasSup.scale.setScalar(facteurPoint);
-      anchor.add(marqueurConcoursBrasSup);
-      reussirConcoursBrasSup();
-    });
+  afficherReponseEchecBrasSup('concours_brasSup', 'Point de concours', 'Écart de ' + Math.round(d * 100) + ' cm avec le croisement exact',
+    function () { majPanneauBrasSup(null); }, reussirConcoursBrasSup);
 }
 
 function reussirDirectionA() {
@@ -2148,9 +2171,9 @@ function validerDirectionA() {
   var cos = Math.abs(THREE.MathUtils.clamp(traceA.direction.dot(attendue), -1, 1));
   var angle = THREE.MathUtils.radToDeg(Math.acos(cos));
 
-  if (angle <= TOL_ANGLE_FORCE) { reussirDirectionA(); return; }
+  if (angle <= TOL_ANGLE_FORCE) { noterResultat('direction_A'); reussirDirectionA(); return; }
   traceA.fleche.userData.mat.color.set(0xff5f5f);
-  afficherReponseEchecBrasSup('Direction de l’effort en A', 'Écart de ' + Math.round(angle) + '° avec la droite (A, concours)',
+  afficherReponseEchecBrasSup('direction_A', 'Direction de l’effort en A', 'Écart de ' + Math.round(angle) + '° avec la droite (A, concours)',
     function () { majPanneauBrasSup(null); }, reussirDirectionA);
 }
 
@@ -2194,11 +2217,11 @@ var PROGRESSION_SOUS_BRASSUP = { direction_G: '1 / 4', concours: '2 / 4', direct
 function majPanneauBrasSup(message) {
   var corps = [];
   if (etapeBrasSup === 'direction_G') {
-    corps.push('La reaction de la chape en C est maintenant connue (fleche verte, action/reaction avec l\'etape precedente). Trace la direction de l\'effort en G, en t\'alignant sur F et G.');
+    corps.push('La reaction de la chappe sur le bras superieur en C est maintenant connue. Il faut effectuer les memes etapes de resolution sur le bras superieur. Trace la direction de l\'effort en G.');
   } else if (etapeBrasSup === 'concours') {
-    corps.push('Vise l\'intersection de la droite (FG) et de la ligne d\'action en C, gachette pour la marquer.');
+    corps.push('Identifie le point d\'intersection des directions des forces.');
   } else if (etapeBrasSup === 'direction_A') {
-    corps.push('Trace la direction de l\'effort en A, en t\'alignant sur A et le point de concours identifie.');
+    corps.push('Trace la direction de l\'effort en A.');
   } else {
     corps.push({ texte: 'Les 3 directions (reaction en C, G, A) sont determinees.', couleur: '#3ddc84' });
   }
@@ -2207,10 +2230,16 @@ function majPanneauBrasSup(message) {
   var boutons2 = [];
   if (etapeBrasSup !== 'fini') boutons2.push(bouton(0, 0, '< PRÉCÉDENT', '#3a5f8a', precedentBrasSup));
   boutons2.push(bouton(0, 1, 'RECOMMENCER', '#7d4f2f', recommencerBrasSup));
-  if (etapeBrasSup === 'direction_G') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerDirectionG));
-  else if (etapeBrasSup === 'concours') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerConcoursBrasSup));
-  else if (etapeBrasSup === 'direction_A') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerDirectionA));
-  else boutons2.push(bouton(0, 0, 'CONTINUER', '#2f7d4f', passerEnTriangleBrasSup));
+  if (etapeBrasSup === 'direction_G') {
+    boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerDirectionG));
+    boutons2.push(bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', function () { noterResultat('direction_G', 'saute'); reussirDirectionG(); }));
+  } else if (etapeBrasSup === 'concours') {
+    boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerConcoursBrasSup));
+    boutons2.push(bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', function () { noterResultat('concours_brasSup', 'saute'); reussirConcoursBrasSup(); }));
+  } else if (etapeBrasSup === 'direction_A') {
+    boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerDirectionA));
+    boutons2.push(bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', function () { noterResultat('direction_A', 'saute'); reussirDirectionA(); }));
+  } else boutons2.push(bouton(0, 0, 'CONTINUER', '#2f7d4f', passerEnTriangleBrasSup));
 
   dessinerPanneau({
     eyebrow: EYEBROW_BRASSUP,
@@ -2239,7 +2268,6 @@ var ligneG = null, ligneA = null;
 var glissementBrasSup = [null, null];
 
 var marqueurSommetBrasSup = null;
-var sommetTrouveBrasSup   = null;
 
 var traceEffortG = null, traceEffortA = null;
 var manetteActiveEffortBrasSup = -1;
@@ -2283,7 +2311,6 @@ function reinitialiserObjetsTriangleBrasSup() {
   if (traceEffortA) { anchor.remove(traceEffortA.fleche); traceEffortA = null; }
   if (flecheCorrigeG) { anchor.remove(flecheCorrigeG); flecheCorrigeG = null; }
   if (flecheCorrigeA) { anchor.remove(flecheCorrigeA); flecheCorrigeA = null; }
-  sommetTrouveBrasSup = null;
   glissementBrasSup = [null, null];
   manetteActiveEffortBrasSup = -1;
 
@@ -2324,7 +2351,7 @@ function recommencerTriangleBrasSup() {
   majPanneauTriangleBrasSup(null);
 }
 
-var SEQUENCE_TRIANGLE_BRASSUP = ['placer_droites', 'concours', 'effort_G', 'effort_A', 'fini'];
+var SEQUENCE_TRIANGLE_BRASSUP = ['placer_droites', 'effort_G', 'effort_A', 'fini'];
 function precedentTriangleBrasSup() {
   var i = SEQUENCE_TRIANGLE_BRASSUP.indexOf(etapeTriangleBrasSup);
   if (i > 0) { etapeTriangleBrasSup = SEQUENCE_TRIANGLE_BRASSUP[i - 1]; majPanneauTriangleBrasSup(null); return; }
@@ -2333,14 +2360,15 @@ function precedentTriangleBrasSup() {
   majPanneauBrasSup(null);
 }
 
-function afficherReponseEchecTriangleBrasSup(titreSousEtape, detail, actionReessayer, actionVoirCorrige) {
+function afficherReponseEchecTriangleBrasSup(id, titreSousEtape, detail, actionReessayer, actionVoirCorrige) {
+  noterEchec(id);
   dessinerPanneau({
     eyebrow: EYEBROW_BRASSUP,
     titre: 'Réponse — ' + titreSousEtape,
     statut: { ok: false, titre: 'Pas encore juste', detail: detail },
     boutons: [
       bouton(0, 0, 'RÉESSAYER',       '#2f7d4f', actionReessayer),
-      bouton(0, 1, 'VOIR LE CORRIGÉ', '#3a5f8a', actionVoirCorrige),
+      bouton(0, 1, 'VOIR LE CORRIGÉ', '#3a5f8a', function () { noterResultat(id, 'aide'); actionVoirCorrige(); }),
       bouton(0, 2, '< PRÉCÉDENT',     '#4a4a4a', precedentTriangleBrasSup)
     ],
     curseurs: curseursEpaisseurStandard()
@@ -2356,46 +2384,39 @@ function reussirLignesTriangleBrasSup() {
   ligneA.mesh.userData.mat.color.set(0x3ddc84);
   ligneG.poignee.material.color.set(0x3ddc84);
   ligneA.poignee.material.color.set(0x3ddc84);
-  etapeTriangleBrasSup = 'concours';
+
+  // Point de resolution place automatiquement, meme principe qu'a l'etape 3.
+  if (marqueurSommetBrasSup) { anchor.remove(marqueurSommetBrasSup); }
+  marqueurSommetBrasSup = new THREE.Mesh(
+    new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
+    new THREE.MeshBasicMaterial({ color: 0x3ddc84, depthTest: false })
+  );
+  marqueurSommetBrasSup.position.copy(triangleInfoBrasSup.sommet);
+  marqueurSommetBrasSup.scale.setScalar(facteurPoint);
+  anchor.add(marqueurSommetBrasSup);
+
+  etapeTriangleBrasSup = 'effort_G';
   majPanneauTriangleBrasSup(null);
 }
 function validerLignesTriangleBrasSup() {
   var dG = distancePointDroite(triangleInfoBrasSup.pointeP, ligneG.ancrage, ligneG.direction);
   var dA = distancePointDroite(triangleInfoBrasSup.origineTriangle, ligneA.ancrage, ligneA.direction);
-  if (dG <= TOL_LIGNE_TRIANGLE && dA <= TOL_LIGNE_TRIANGLE) { reussirLignesTriangleBrasSup(); return; }
+  if (dG <= TOL_LIGNE_TRIANGLE && dA <= TOL_LIGNE_TRIANGLE) { noterResultat('triangle_brasSup_droites'); reussirLignesTriangleBrasSup(); return; }
   var probleme = (dG > TOL_LIGNE_TRIANGLE && dA > TOL_LIGNE_TRIANGLE) ? 'Les deux droites ne passent pas encore par les extremites de la reaction en C'
     : (dG > TOL_LIGNE_TRIANGLE) ? 'La droite G ne passe pas encore par la pointe de la reaction en C'
     : 'La droite A ne passe pas encore par le talon de la reaction en C';
-  afficherReponseEchecTriangleBrasSup('Placement des droites', probleme, function () { majPanneauTriangleBrasSup(null); }, reussirLignesTriangleBrasSup);
-}
-
-function reussirConcoursTriangleBrasSup() {
-  marqueurSommetBrasSup.position.copy(triangleInfoBrasSup.sommet);
-  marqueurSommetBrasSup.material.color.set(0x3ddc84);
-  etapeTriangleBrasSup = 'effort_G';
-  majPanneauTriangleBrasSup(null);
-}
-function validerConcoursTriangleBrasSup() {
-  if (!sommetTrouveBrasSup) { majPanneauTriangleBrasSup('Vise le croisement des deux droites et appuie sur la gachette.'); return; }
-  var d = sommetTrouveBrasSup.distanceTo(triangleInfoBrasSup.sommet);
-  if (d <= TOL_CONCOURS_TRIANGLE) { reussirConcoursTriangleBrasSup(); return; }
-  anchor.remove(marqueurSommetBrasSup);
-  marqueurSommetBrasSup = null;
-  sommetTrouveBrasSup = null;
-  afficherReponseEchecTriangleBrasSup('Point de résolution', 'Écart de ' + Math.round(d * 100) + ' cm avec le croisement exact',
-    function () { majPanneauTriangleBrasSup(null); }, function () {
-      sommetTrouveBrasSup = triangleInfoBrasSup.sommet.clone();
-      marqueurSommetBrasSup = new THREE.Mesh(
-        new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
-        new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
-      );
-      marqueurSommetBrasSup.scale.setScalar(facteurPoint);
-      anchor.add(marqueurSommetBrasSup);
-      reussirConcoursTriangleBrasSup();
-    });
+  afficherReponseEchecTriangleBrasSup('triangle_brasSup_droites', 'Placement des droites', probleme, function () { majPanneauTriangleBrasSup(null); }, reussirLignesTriangleBrasSup);
 }
 
 function reussirEffortG() {
+  if (!traceEffortG) {
+    var fEG = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+    anchor.add(fEG);
+    traceEffortG = { fleche: fEG, origine: triangleInfoBrasSup.pointeP.clone(), direction: null, arrivee: null };
+  }
+  majFleche(traceEffortG.fleche, traceEffortG.origine, triangleInfoBrasSup.sommet);
+  traceEffortG.arrivee = triangleInfoBrasSup.sommet.clone();
+  traceEffortG.direction = triangleInfoBrasSup.sommet.clone().sub(traceEffortG.origine).normalize();
   traceEffortG.fleche.userData.mat.color.set(0x3ddc84);
   etapeTriangleBrasSup = 'effort_A';
   majPanneauTriangleBrasSup(null);
@@ -2403,18 +2424,21 @@ function reussirEffortG() {
 function validerEffortG() {
   if (!traceEffortG || !traceEffortG.direction) { majPanneauTriangleBrasSup('Trace d\'abord l\'effort en G : gachette depuis la pointe de la reaction en C, jusqu\'au point de resolution.'); return; }
   var d = traceEffortG.arrivee.distanceTo(triangleInfoBrasSup.sommet);
-  if (d <= TOL_EFFORT_TRIANGLE) { reussirEffortG(); return; }
+  if (d <= TOL_EFFORT_TRIANGLE) { noterResultat('triangle_brasSup_effort_G'); reussirEffortG(); return; }
   traceEffortG.fleche.userData.mat.color.set(0xff5f5f);
-  afficherReponseEchecTriangleBrasSup('Effort en G', 'Écart de ' + Math.round(d * 100) + ' cm avec le point de resolution',
-    function () { majPanneauTriangleBrasSup(null); }, function () {
-      majFleche(traceEffortG.fleche, traceEffortG.origine, triangleInfoBrasSup.sommet);
-      traceEffortG.arrivee = triangleInfoBrasSup.sommet.clone();
-      traceEffortG.direction = triangleInfoBrasSup.sommet.clone().sub(traceEffortG.origine).normalize();
-      reussirEffortG();
-    });
+  afficherReponseEchecTriangleBrasSup('triangle_brasSup_effort_G', 'Effort en G', 'Écart de ' + Math.round(d * 100) + ' cm avec le point de resolution',
+    function () { majPanneauTriangleBrasSup(null); }, reussirEffortG);
 }
 
 function reussirEffortA() {
+  if (!traceEffortA) {
+    var fEA = creerFleche(0x3ddc84, RAYON_FLECHE_FORCE);
+    anchor.add(fEA);
+    traceEffortA = { fleche: fEA, origine: triangleInfoBrasSup.sommet.clone(), direction: null, arrivee: null };
+  }
+  majFleche(traceEffortA.fleche, traceEffortA.origine, triangleInfoBrasSup.origineTriangle);
+  traceEffortA.arrivee = triangleInfoBrasSup.origineTriangle.clone();
+  traceEffortA.direction = triangleInfoBrasSup.origineTriangle.clone().sub(traceEffortA.origine).normalize();
   traceEffortA.fleche.userData.mat.color.set(0x3ddc84);
   etapeTriangleBrasSup = 'fini';
   afficherResultatTriangleBrasSup();
@@ -2422,15 +2446,10 @@ function reussirEffortA() {
 function validerEffortA() {
   if (!traceEffortA || !traceEffortA.direction) { majPanneauTriangleBrasSup('Trace d\'abord l\'effort en A : gachette depuis le point de resolution, jusqu\'au talon de la reaction en C.'); return; }
   var d = traceEffortA.arrivee.distanceTo(triangleInfoBrasSup.origineTriangle);
-  if (d <= TOL_EFFORT_TRIANGLE) { reussirEffortA(); return; }
+  if (d <= TOL_EFFORT_TRIANGLE) { noterResultat('triangle_brasSup_effort_A'); reussirEffortA(); return; }
   traceEffortA.fleche.userData.mat.color.set(0xff5f5f);
-  afficherReponseEchecTriangleBrasSup('Effort en A', 'Écart de ' + Math.round(d * 100) + ' cm avec le talon de la reaction en C',
-    function () { majPanneauTriangleBrasSup(null); }, function () {
-      majFleche(traceEffortA.fleche, traceEffortA.origine, triangleInfoBrasSup.origineTriangle);
-      traceEffortA.arrivee = triangleInfoBrasSup.origineTriangle.clone();
-      traceEffortA.direction = triangleInfoBrasSup.origineTriangle.clone().sub(traceEffortA.origine).normalize();
-      reussirEffortA();
-    });
+  afficherReponseEchecTriangleBrasSup('triangle_brasSup_effort_A', 'Effort en A', 'Écart de ' + Math.round(d * 100) + ' cm avec le talon de la reaction en C',
+    function () { majPanneauTriangleBrasSup(null); }, reussirEffortA);
 }
 
 // Affiche un corrige exact (le vrai triangle, tel que calcule) une fois les
@@ -2476,10 +2495,8 @@ function afficherAideTriangleBrasSup() {
       '',
       { texte: 'Attrape (grip) chaque droite jaune par sa poignee et fais-la glisser, sans la faire pivoter, jusqu\'a une extremite de cette reaction : la droite G par la pointe, la droite A par le talon.', couleur: '#9fd0ff' }
     ];
-  } else if (etapeTriangleBrasSup === 'concours') {
-    corps = [{ texte: 'Vise le croisement des 2 droites avec le rayon bleu et appuie sur la gachette pour le marquer.', couleur: '#9fd0ff' }];
   } else if (etapeTriangleBrasSup === 'effort_G') {
-    corps = [{ texte: 'Gachette maintenue depuis la pointe de la reaction en C, tire jusqu\'au point de resolution, relache. Le sens compte.', couleur: '#9fd0ff' }];
+    corps = [{ texte: 'Le point de resolution (croisement des 2 droites) est deja marque. Gachette maintenue depuis la pointe de la reaction en C, tire jusqu\'a ce point, relache. Le sens compte.', couleur: '#9fd0ff' }];
   } else {
     corps = [{ texte: 'Meme principe pour l\'effort en A, dans l\'autre sens : depuis le point de resolution, jusqu\'au talon de la reaction en C.', couleur: '#9fd0ff' }];
   }
@@ -2493,23 +2510,36 @@ function afficherAideTriangleBrasSup() {
 
 var TITRES_SOUS_TRIANGLE_BRASSUP = {
   placer_droites: 'Triangle des forces — placement des droites',
-  concours:       'Triangle des forces — point de résolution',
   effort_G:       'Triangle des forces — effort en G',
   effort_A:       'Triangle des forces — effort en A'
 };
 
 function majPanneauTriangleBrasSup(message) {
-  var corps = [{ texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' }];
+  var corps = [];
+  if (etapeTriangleBrasSup === 'placer_droites') {
+    corps.push('Forme le triangle des forces.');
+  } else if (etapeTriangleBrasSup === 'effort_G') {
+    corps.push('Trace le vecteur de l\'effort en G sur le triangle des forces.');
+  } else if (etapeTriangleBrasSup === 'effort_A') {
+    corps.push('Trace le vecteur de l\'effort en A sur le triangle des forces.');
+  }
+  corps.push({ texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' });
   if (message) corps.push('', { texte: message, couleur: '#ff9f4a' });
 
   var boutons2 = [
     bouton(0, 0, '< PRÉCÉDENT', '#3a5f8a', precedentTriangleBrasSup),
     bouton(0, 1, 'RECOMMENCER', '#7d4f2f', recommencerTriangleBrasSup)
   ];
-  if (etapeTriangleBrasSup === 'placer_droites') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerLignesTriangleBrasSup));
-  else if (etapeTriangleBrasSup === 'concours') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerConcoursTriangleBrasSup));
-  else if (etapeTriangleBrasSup === 'effort_G') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerEffortG));
-  else if (etapeTriangleBrasSup === 'effort_A') boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerEffortA));
+  if (etapeTriangleBrasSup === 'placer_droites') {
+    boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerLignesTriangleBrasSup));
+    boutons2.push(bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', function () { noterResultat('triangle_brasSup_droites', 'saute'); reussirLignesTriangleBrasSup(); }));
+  } else if (etapeTriangleBrasSup === 'effort_G') {
+    boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerEffortG));
+    boutons2.push(bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', function () { noterResultat('triangle_brasSup_effort_G', 'saute'); reussirEffortG(); }));
+  } else if (etapeTriangleBrasSup === 'effort_A') {
+    boutons2.push(bouton(1, 0, 'VALIDER', '#2f7d4f', validerEffortA));
+    boutons2.push(bouton(1, 1, 'SAUTER LA QUESTION', '#4a4a4a', function () { noterResultat('triangle_brasSup_effort_A', 'saute'); reussirEffortA(); }));
+  }
 
   dessinerPanneau({
     eyebrow: EYEBROW_BRASSUP,
@@ -2520,6 +2550,62 @@ function majPanneauTriangleBrasSup(message) {
     boutons: boutons2,
     curseurs: curseursEpaisseurStandard()
   });
+}
+
+// =====================================================================
+//  SUIVI DE COMPETENCE
+//
+//  Pas de note chiffree : pour chaque question suivie, on retient juste
+//  comment elle s'est terminee (reussie du premier coup, reussie apres
+//  au moins un echec, corrige affiche sans avoir reussi, ou sautee),
+//  puis on en tire un niveau par competence (0 a 5, rouge -> vert),
+//  regroupe en 3 messages : "necessite de revoir le cours" (0-1),
+//  "necessite de l'entrainement" (2-3), "competence maitrisee" (4-5).
+// =====================================================================
+var statsQuestions = {};   // id -> { essais: 0, resultat: null|'parfait'|'reessaye'|'aide'|'saute' }
+
+function noterEchec(id) {
+  if (!statsQuestions[id]) statsQuestions[id] = { essais: 0, resultat: null };
+  statsQuestions[id].essais++;
+}
+// force omis : deduit des essais deja notes (reussite du premier coup ou apres coup).
+function noterResultat(id, force) {
+  if (!statsQuestions[id]) statsQuestions[id] = { essais: 0, resultat: null };
+  var s = statsQuestions[id];
+  s.resultat = force || (s.essais > 0 ? 'reessaye' : 'parfait');
+}
+
+var COMPETENCES = [
+  { cle: 'liaisons',  nom: 'Classes d\'équivalence et liaisons',
+    questions: ['coloriage'] },
+  { cle: 'isolement', nom: 'Isolement et directions des efforts',
+    questions: ['direction_D', 'concours_chape', 'direction_C', 'direction_G', 'concours_brasSup', 'direction_A'] },
+  { cle: 'triangle',  nom: 'Triangle des forces',
+    questions: ['triangle_chape_droites', 'triangle_chape_effort_D', 'triangle_chape_effort_C',
+                'triangle_brasSup_droites', 'triangle_brasSup_effort_G', 'triangle_brasSup_effort_A'] }
+];
+
+function pointsQuestion(id) {
+  var s = statsQuestions[id];
+  if (!s || !s.resultat) return 0;   // jamais atteinte (ex: etape sautee via un chemin plus haut)
+  if (s.resultat === 'parfait')  return 2;
+  if (s.resultat === 'reessaye') return 1;
+  return 0;   // 'aide' (corrige vu apres un echec) ou 'saute' : jamais reussie par l'etudiant lui-meme
+}
+
+// Niveau 0 (rouge, a revoir) a 5 (vert, maitrise) : 6 teintes degradees,
+// 2 par message ("a revoir" / "entrainement" / "maitrisee").
+var COULEURS_NIVEAU = ['#ff4d4d', '#ff8c42', '#ffb020', '#ffd93d', '#8bd450', '#3ddc84'];
+var LIBELLES_NIVEAU = [
+  'Nécessite de revoir le cours', 'Nécessite de revoir le cours',
+  'Nécessite de l\'entraînement', 'Nécessite de l\'entraînement',
+  'Compétence maîtrisée', 'Compétence maîtrisée'
+];
+
+function niveauCompetence(competence) {
+  var total = competence.questions.reduce(function (acc, id) { return acc + pointsQuestion(id); }, 0);
+  var moyenne = total / competence.questions.length;   // 0 a 2
+  return Math.min(5, Math.floor((moyenne / 2) * 6));
 }
 
 // =====================================================================
@@ -2549,8 +2635,10 @@ var TITRES_BILAN = [
   '3. Triangle des forces (chape)',
   '4. Isolement du bras supérieur',
   '5. Triangle des forces (bras supérieur)',
-  'Vue d\'ensemble'
+  'Vue d\'ensemble',
+  'Compétences'
 ];
+var ETAPE_BILAN_COMPETENCES = TITRES_BILAN.length - 1;
 
 function restaurerOpaciteComplete() {
   piecesModele.forEach(function (p) { p.meshes.forEach(function (m) { m.material.opacity = 1; }); });
@@ -2682,7 +2770,7 @@ function demarrerBilan() {
 }
 
 function suivantBilan() {
-  if (etapeBilan >= 5) return;
+  if (etapeBilan >= ETAPE_BILAN_COMPETENCES) return;
   etapeBilan++;
   reveelerPhaseBilan();
   majPanneauBilan();
@@ -2713,27 +2801,36 @@ function majPanneauBilan() {
     corps.push('Le triangle des forces sur le bras superieur donne les intensites :');
     corps.push({ texte: 'Effort en G (levier) ≈ ' + Math.round(triangleInfoBrasSup.forceG_N) + ' N', couleur: '#dfeaf5' });
     corps.push({ texte: 'Effort en A (bati) ≈ ' + Math.round(triangleInfoBrasSup.forceA_N) + ' N', couleur: '#dfeaf5' });
-  } else {
+  } else if (etapeBilan === 5) {
     corps.push('Recapitulatif complet :');
     corps.push({ texte: 'Poids P                      ≈ ' + Math.round(triangleInfo.poidsN) + ' N', couleur: '#dfeaf5' });
     corps.push({ texte: 'Effort en D (bras inferieur)  ≈ ' + Math.round(triangleInfo.forceD_N) + ' N', couleur: '#dfeaf5' });
     corps.push({ texte: 'Effort en C (bras superieur)  ≈ ' + Math.round(triangleInfo.forceC_N) + ' N', couleur: '#dfeaf5' });
     corps.push({ texte: 'Effort en G (levier)          ≈ ' + Math.round(triangleInfoBrasSup.forceG_N) + ' N', couleur: '#dfeaf5' });
     corps.push({ texte: 'Effort en A (bati)             ≈ ' + Math.round(triangleInfoBrasSup.forceA_N) + ' N', couleur: '#dfeaf5' });
+  } else {
+    corps.push('Niveau estime sur les 3 grandes competences de l\'exercice (base sur tes reussites, essais et questions sautees) :');
+    corps.push('');
+    COMPETENCES.forEach(function (comp) {
+      var niveau = niveauCompetence(comp);
+      corps.push({ texte: comp.nom + ' : ' + LIBELLES_NIVEAU[niveau], couleur: COULEURS_NIVEAU[niveau] });
+    });
   }
-  corps.push('');
-  corps.push({ texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' });
+  if (etapeBilan !== ETAPE_BILAN_COMPETENCES) {
+    corps.push('');
+    corps.push({ texte: 'Echelle des forces : 1 cm = 200 N.', couleur: '#9fd0ff' });
+  }
 
   var boutons2 = [
     bouton(0, 0, '< PRECEDENT', '#3a5f8a', precedentBilan),
     bouton(0, 1, 'SUIVANT >',   '#3a5f8a', suivantBilan)
   ];
-  if (etapeBilan === 5) boutons2.push(bouton(0, 2, 'REVOIR', '#4a4a4a', demarrerBilan));
+  if (etapeBilan === ETAPE_BILAN_COMPETENCES) boutons2.push(bouton(0, 2, 'REVOIR', '#4a4a4a', demarrerBilan));
 
   dessinerPanneau({
     eyebrow: EYEBROW_BILAN,
     titre: TITRES_BILAN[etapeBilan],
-    sousTitre: (etapeBilan + 1) + ' / 6',
+    sousTitre: (etapeBilan + 1) + ' / ' + TITRES_BILAN.length,
     corps: corps,
     boutons: boutons2,
     curseurs: curseursEpaisseurStandard()
@@ -2762,7 +2859,8 @@ function majPanneau(message) {
   var pt = points[courant];
   var corps = [
     { texte: pt.nom, couleur: '#ffe37a' },
-    { texte: pt.pos ? 'Deja place. Rappuie pour le corriger.' : 'Vise le centre de cette liaison, gachette pour poser.', couleur: '#cfd8e6' }
+    { texte: 'Il faut maintenant situer les centres des liaisons entre classes d\'equivalence. Vise un point sur l\'axe de la liaison et clique sur la gachette pour le selectionner. Un point apparaitra sur le plan median du cric.', couleur: '#cfd8e6' },
+    { texte: pt.pos ? 'Deja place. Rappuie pour le corriger.' : 'Pas encore place.', couleur: '#9fd0ff' }
   ];
   if (message) corps.push('', { texte: message, couleur: '#ff9f4a' });
 
@@ -2773,12 +2871,9 @@ function majPanneau(message) {
     corps: corps,
     aide: afficherAideLiaisons,
     boutons: [
-      bouton(0, 0, '< PRECEDENT',   '#3a5f8a', precedent),
-      bouton(0, 1, 'SUIVANT >',     '#3a5f8a', suivant),
-      bouton(0, 2, 'AJOUTER POINT', '#4a4a4a', ajouterPoint),
-      bouton(1, 0, 'SUPPRIMER',     '#7d4f2f', supprimerCourant),
-      bouton(1, 1, 'ENREGISTRER',   '#2f7d4f', enregistrer),
-      bouton(1, 2, 'ANNULER',       '#3a5f8a', annulerDerniere)
+      bouton(0, 0, '< PRECEDENT', '#3a5f8a', precedent),
+      bouton(0, 1, 'VALIDER',     '#2f7d4f', validerPoint),
+      bouton(0, 2, 'ANNULER',     '#3a5f8a', annulerDerniere)
     ],
     curseurs: curseursEpaisseurStandard()
   });
@@ -2907,22 +3002,6 @@ controllers.forEach(function (ctrl, idx) {
     if (etape === 'triangle') {
       if (etapeTriangle === 'placer_droites') return;   // rien a faire ici, seul le grip agit
 
-      if (etapeTriangle === 'concours') {
-        if (sommetTrouve) return;   // deja pose : il faut RECOMMENCER pour reessayer
-        var wpSommet = new THREE.Vector3();
-        ctrl.getWorldPosition(wpSommet);
-        sommetTrouve = versAncre(projeterLocal(racine.worldToLocal(wpSommet)));
-        marqueurSommet = new THREE.Mesh(
-          new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
-          new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
-        );
-        marqueurSommet.position.copy(sommetTrouve);
-        marqueurSommet.scale.setScalar(facteurPoint);
-        anchor.add(marqueurSommet);
-        majPanneauTriangle(null);
-        return;
-      }
-
       if (etapeTriangle === 'effort_D') {
         if (traceEffortD) return;
         var fED = creerFleche(0xffd400, RAYON_FLECHE_FORCE);
@@ -2986,22 +3065,6 @@ controllers.forEach(function (ctrl, idx) {
     if (etape === 'triangle_bras_sup') {
       if (etapeTriangleBrasSup === 'placer_droites') return;   // rien a faire ici, seul le grip agit
 
-      if (etapeTriangleBrasSup === 'concours') {
-        if (sommetTrouveBrasSup) return;   // deja pose : il faut RECOMMENCER pour reessayer
-        var wpSommetBS = new THREE.Vector3();
-        ctrl.getWorldPosition(wpSommetBS);
-        sommetTrouveBrasSup = versAncre(projeterLocal(racine.worldToLocal(wpSommetBS)));
-        marqueurSommetBrasSup = new THREE.Mesh(
-          new THREE.SphereGeometry(RAYON_MARQUEUR_POINT, 14, 14),
-          new THREE.MeshBasicMaterial({ color: 0xffd400, depthTest: false })
-        );
-        marqueurSommetBrasSup.position.copy(sommetTrouveBrasSup);
-        marqueurSommetBrasSup.scale.setScalar(facteurPoint);
-        anchor.add(marqueurSommetBrasSup);
-        majPanneauTriangleBrasSup(null);
-        return;
-      }
-
       if (etapeTriangleBrasSup === 'effort_G') {
         if (traceEffortG) return;
         var fEG = creerFleche(0xffd400, RAYON_FLECHE_FORCE);
@@ -3045,7 +3108,7 @@ controllers.forEach(function (ctrl, idx) {
       points[courant].pos = racine.worldToLocal(viseeLiaison.point.clone());
       points[courant].meshProche = viseeLiaison.nomMesh;
       majMarqueur(courant);
-      allerA(pointSuivantNonPlace(courant));
+      majPanneau(null);   // reste sur ce point : c'est VALIDER qui fait avancer
     } else {
       majPanneau('Vise une surface du modele avec le rayon bleu.');
     }
