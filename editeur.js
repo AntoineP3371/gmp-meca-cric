@@ -2217,7 +2217,7 @@ var PROGRESSION_SOUS_BRASSUP = { direction_G: '1 / 4', concours: '2 / 4', direct
 function majPanneauBrasSup(message) {
   var corps = [];
   if (etapeBrasSup === 'direction_G') {
-    corps.push('La reaction de la chappe sur le bras superieur en C est maintenant connue. Il faut effectuer les memes etapes de resolution sur le bras superieur. Trace la direction de l\'effort en G.');
+    corps.push('La reaction de la chape sur le bras superieur en C est maintenant connue. Il faut effectuer les memes etapes de resolution sur le bras superieur. Trace la direction de l\'effort en G.');
   } else if (etapeBrasSup === 'concours') {
     corps.push('Identifie le point d\'intersection des directions des forces.');
   } else if (etapeBrasSup === 'direction_A') {
