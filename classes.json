@@ -22,7 +22,7 @@
 
   "modele": "cric-v1.glb",
 
-  "consigne": "Choisis une couleur, puis vise une piece et appuie sur la gachette pour la peindre. Regroupe par la meme couleur toutes les pieces qui appartiennent au meme solide, c'est-a-dire qui ne bougent jamais l'une par rapport a l'autre.",
+  "consigne": "Regroupe les differentes pieces appartenant a la meme classe d'equivalence. Choisis une couleur, vise et appuie sur la gachette sur la ou les pieces d'une meme classe d'equivalence.",
 
   "classes": [
     {
